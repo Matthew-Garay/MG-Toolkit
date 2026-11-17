@@ -41,11 +41,12 @@ Para ver lo que haría sin cambiar nada, activa el **modo simulación** (opción
 | **Hacer todo** | Todo preguntando paso a paso (S / N / T = sí a todo) · Todo automático · Solo diagnóstico con informe |
 | **Limpieza** | Temporales y basura · Caché de navegadores · Papelera · Hibernación · Buscar archivos grandes · Quitar apps basura de fábrica |
 | **Velocidad** | Máximo rendimiento · Liberar RAM · Programas de inicio · Qué consume más · Servicios sin uso · Telemetría y anuncios · Medir velocidad del disco · Deshacer cambios |
-| **Actualizar** | Actualizaciones de Windows · Actualizar todos los programas · Instalar programas básicos (Chrome, 7-Zip, VLC, AnyDesk…) |
+| **Actualizar** | Actualizaciones de Windows · Actualizar drivers · Actualizar todos los programas · Instalar programas básicos (Chrome, 7-Zip, VLC, AnyDesk…) |
+| **Red e internet** | Probar internet (router, DNS, velocidad) · Cambiar DNS · Programas conectados a internet · Archivo hosts · Quitar proxy de publicidad · Sincronizar la hora |
 | **Seguridad y respaldo** | Buscar virus con Defender (rápido, completo y sin conexión) · Punto de restauración · Respaldar archivos a USB · Respaldar y restaurar drivers |
 | **Reparación** | DISM + SFC · CHKDSK · Optimizar disco · Reparar internet · Reparar Windows Update · Destrabar impresora · Reiniciar servicios · Firewall · Probar RAM |
-| **Información** | Datos del equipo y salud del disco · Batería · Activación · Contraseñas y reporte de WiFi |
-| **Automático** | Mantenimiento semanal programado (limpieza segura y análisis de virus) |
+| **Información** | Datos del equipo y salud del disco · Batería · Activación · Contraseñas y reporte de WiFi · Clave de producto · Lista de programas instalados |
+| **Sistema** | Mantenimiento semanal programado · Reiniciar en modo seguro o a la BIOS · Atajos a 22 herramientas de Windows |
 
 ## El informe
 

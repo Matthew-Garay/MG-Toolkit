@@ -1411,6 +1411,12 @@ function Get-Diagnostics {
     }
     if ($fwOff.Count -gt 0) { $d = 'Desactivado en: ' + (($fwOff | ForEach-Object { $_.Name }) -join ', '); Add-Check 'Seguridad' 'Firewall' 'ATENCION' $d 'Activar el firewall de Windows (salvo que haya otro firewall instalado).' }
     else { Add-Check 'Seguridad' 'Firewall' 'OK' 'Activo en todos los perfiles' }
+    $hostsN = @(Get-HostsEntries).Count
+    if ($hostsN -gt 0) { Add-Check 'Seguridad' 'Archivo hosts' 'ATENCION' ([string]$hostsN + ' redireccion(es) en el archivo hosts') 'Revisar con la opcion 46: algunos virus lo usan para llevar a paginas falsas.' }
+    else { Add-Check 'Seguridad' 'Archivo hosts' 'OK' 'Sin redirecciones' }
+    $px = Get-ProxyState
+    if ($px.Enabled -or $px.Pac) { Add-Check 'Seguridad' 'Proxy' 'ATENCION' ('Proxy activo: ' + $px.Server + ' ' + $px.Pac) 'Si el equipo no es de una empresa, puede ser publicidad (adware): quitarlo con la opcion 47.' }
+    if (Get-SafeBootState) { Add-Check 'Windows' 'Modo seguro' 'ATENCION' 'El equipo arranca siempre en modo seguro' 'Volver al inicio normal con la opcion 52 > 3.' }
     $lua = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
     if ($lua -eq 0) { Add-Check 'Seguridad' 'Control de cuentas (UAC)' 'CRITICO' 'Desactivado' 'Activar UAC: protege contra programas maliciosos.' }
 
@@ -1543,7 +1549,7 @@ function Get-Diagnostics {
 
     # ------------------------- INTERNET -------------------------
     $ping = Test-Connection -ComputerName 1.1.1.1 -Count 2 -Quiet -ErrorAction SilentlyContinue
-    $dns = $false; try { $null = [System.Net.Dns]::GetHostAddresses('www.microsoft.com'); $dns = $true } catch {}
+    $dns = Test-DnsName 'www.microsoft.com'
     if ($dns)      { Add-Check 'Red' 'Internet' 'OK' 'Conexion y DNS funcionando' }
     elseif ($ping) { Add-Check 'Red' 'Internet' 'ATENCION' 'Hay conexion pero el DNS falla' 'Usar Modulo 3 > Restaurar la pila de red, o configurar DNS 1.1.1.1 / 8.8.8.8.' }
     else           { Add-Check 'Red' 'Internet' 'CRITICO' 'Sin conexion a internet' 'Revisar cable/WiFi/router; luego Modulo 3 > Restaurar la pila de red.' }
@@ -2582,6 +2588,455 @@ function T-Schedule {
         }
     }
 }
+# =====================================================================
+#   RED, SEGURIDAD Y SISTEMA (opciones 43 a 53) - compatibles con Windows 7 a 11
+# =====================================================================
+
+# Conexiones de red activas (con puerta de enlace). Get-WmiObject para poder usar sus metodos.
+function Get-ActiveAdapters {
+    @(Get-WmiObject Win32_NetworkAdapterConfiguration -Filter 'IPEnabled = TRUE' -ErrorAction SilentlyContinue | Where-Object { $_.DefaultIPGateway })
+}
+
+function Test-Ping([string]$target, [int]$count = 10) {
+    $times = @(); $ok = 0; $netOk = $true
+    try { $ping = New-Object System.Net.NetworkInformation.Ping } catch { $netOk = $false }
+    if ($netOk) {
+        for ($i = 0; $i -lt $count; $i++) {
+            try { $r = $ping.Send($target, 1500); if ([string]$r.Status -eq 'Success') { $ok++; $times += [int]$r.RoundtripTime } }
+            catch { if ($_.Exception.InnerException -isnot [System.Net.NetworkInformation.PingException] -or $i -eq 0) { $netOk = $false; break } }
+        }
+    }
+    if (-not $netOk) {
+        # Plan B: el comando ping de Windows (las lineas con "TTL=" son respuestas, en cualquier idioma)
+        $times = @(); $ok = 0
+        foreach ($l in @(ping.exe -n $count -w 1500 $target 2>&1)) {
+            if ([string]$l -match 'TTL=') { $ok++; if ([string]$l -match '[=<](\d+)\s*ms') { $times += [int]$matches[1] } }
+        }
+    }
+    $avg = -1; $max = -1
+    if ($times.Count -gt 0) { $m = $times | Measure-Object -Average -Maximum; $avg = [math]::Round($m.Average); $max = [int]$m.Maximum }
+    return (New-Object PSObject -Property @{ Ok = $ok; Total = $count; Loss = [math]::Round(100 * ($count - $ok) / $count); Avg = $avg; Max = $max })
+}
+
+# Comprueba que el DNS resuelva un nombre. Plan B con ping.exe si .NET no puede usar la red.
+function Test-DnsName([string]$name) {
+    try { $null = [System.Net.Dns]::GetHostAddresses($name); return $true } catch {}
+    $o = ping.exe -n 1 -w 1000 $name 2>&1 | Out-String
+    return ($o -match '\[[0-9a-fA-F\.:]+\]')
+}
+
+function Format-PingResult($r) {
+    if ($r.Ok -eq 0) { return 'NO RESPONDE' }
+    return ('{0} ms promedio, {1}% de perdida' -f $r.Avg, $r.Loss)
+}
+
+# Descarga 10 MB y calcula la velocidad (Mbps). Si HTTPS no funciona (Windows 7 viejo) usa un servidor HTTP.
+function Measure-Download {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
+    foreach ($url in @('https://speed.cloudflare.com/__down?bytes=10000000', 'http://speed.cloudflare.com/__down?bytes=10000000', 'http://cachefly.cachefly.net/10mb.test')) {
+        try {
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers.Add('User-Agent', 'MG-Toolkit')
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $data = $wc.DownloadData($url)
+            $sw.Stop()
+            if ($data.Length -gt 1000000 -and $sw.Elapsed.TotalSeconds -gt 0) { return [math]::Round($data.Length * 8 / $sw.Elapsed.TotalSeconds / 1000000, 1) }
+        } catch {}
+    }
+    return -1
+}
+
+function T-SpeedTest {
+    Write-Section 'Probar la conexion a internet'
+    $ad = @(Get-ActiveAdapters)
+    if ($ad.Count -eq 0) { Write-Host '  No hay ninguna conexion de red activa (revisa el cable o la WiFi).' -ForegroundColor Red; return }
+    $gw = [string]@($ad[0].DefaultIPGateway)[0]
+    Write-Host ('  Conexion: ' + $ad[0].Description) -ForegroundColor Gray
+    Write-Host '  1/4 Probando la conexion con el router...'
+    $r1 = Test-Ping $gw 10
+    Write-Host '  2/4 Probando la conexion a internet...'
+    $r2 = Test-Ping '1.1.1.1' 10
+    Write-Host '  3/4 Probando el DNS...'
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $dnsOk = Test-DnsName 'www.wikipedia.org'
+    $sw.Stop(); $dnsMs = [int]$sw.Elapsed.TotalMilliseconds
+    $mbps = -1
+    if ($r2.Ok -gt 0) { Write-Host '  4/4 Midiendo la velocidad de descarga (descarga 10 MB)...'; $mbps = Measure-Download }
+    $dnsTxt = 'NO RESPONDE'; if ($dnsOk) { $dnsTxt = [string]$dnsMs + ' ms' }
+    $spTxt = 'no se pudo medir'; if ($mbps -ge 0) { $spTxt = [string]$mbps + ' Mbps' }
+    Write-Host ''
+    Write-Host (('   Router ({0})' -f $gw).PadRight(32)) -NoNewline; Write-Host (Format-PingResult $r1)
+    Write-Host ('   Internet (1.1.1.1)'.PadRight(32)) -NoNewline; Write-Host (Format-PingResult $r2)
+    Write-Host ('   DNS'.PadRight(32)) -NoNewline; Write-Host $dnsTxt
+    Write-Host ('   Velocidad de descarga'.PadRight(32)) -NoNewline; Write-Host $spTxt
+    Write-Log ('Internet: router ' + (Format-PingResult $r1) + ' | internet ' + (Format-PingResult $r2) + ' | DNS ' + $dnsTxt + ' | descarga ' + $spTxt)
+    Write-Host ''
+    $good = $true
+    if ($r1.Ok -eq 0) { $good = $false; Write-Host '  - El router no responde. Revisa el cable o la WiFi (algunos routers no responden a esta prueba: si internet funciona, ignoralo).' -ForegroundColor Yellow }
+    elseif ($r1.Loss -gt 0 -or $r1.Avg -gt 20) { $good = $false; Write-Host '  - La conexion con el router es inestable: senal WiFi debil o cable danado. Acercate al router o usa cable.' -ForegroundColor Yellow }
+    if ($r2.Ok -eq 0) { $good = $false; Write-Host '  - No hay internet. Reinicia el router; si sigue igual, usa la opcion 28 o llama al proveedor.' -ForegroundColor Red }
+    elseif ($r2.Loss -gt 5 -or $r2.Avg -gt 100) { $good = $false; Write-Host '  - Internet inestable o con mucha demora: puede ser el proveedor o la red saturada.' -ForegroundColor Yellow }
+    if (-not $dnsOk) { $good = $false; Write-Host '  - El DNS no responde: usa la opcion 44 (Cambiar DNS).' -ForegroundColor Yellow }
+    elseif ($dnsMs -gt 300) { $good = $false; Write-Host '  - El DNS es lento: la opcion 44 puede hacer que las paginas empiecen a cargar antes.' -ForegroundColor Yellow }
+    if ($mbps -ge 0 -and $mbps -lt 5) { $good = $false; Write-Host '  - Velocidad muy baja: compara con el plan contratado; prueba con cable para descartar la WiFi.' -ForegroundColor Yellow }
+    if ($good) { Write-Host '  La conexion esta bien.' -ForegroundColor Green }
+}
+
+function T-DNS {
+    Write-Section 'Cambiar los servidores DNS'
+    Write-Host '  El DNS traduce el nombre de las paginas. Uno rapido hace que empiecen a cargar antes.' -ForegroundColor DarkGray
+    $ad = @(Get-ActiveAdapters)
+    if ($ad.Count -eq 0) { Write-Host '  No hay ninguna conexion de red activa.' -ForegroundColor Red; return }
+    foreach ($a in $ad) {
+        $dns = (@($a.DNSServerSearchOrder) | Where-Object { $_ }) -join ', '; if (-not $dns) { $dns = '(automatico)' }
+        $mode = 'IP automatica'; if (-not $a.DHCPEnabled) { $mode = 'IP FIJA' }
+        Write-Host ('   - {0}  [{1}]  DNS actual: {2}' -f $a.Description, $mode, $dns)
+        Write-Log ('DNS antes en ' + $a.Description + ': ' + $dns)
+    }
+    Write-Host ''
+    Write-Host '   1. Cloudflare  (1.1.1.1)  - el mas rapido'
+    Write-Host '   2. Google      (8.8.8.8)'
+    Write-Host '   3. Automatico  (volver al DNS del router / proveedor)'
+    Write-Host '   0. Volver'
+    $servers = $null; $label = ''
+    switch ((Read-Host '  Opcion').Trim()) {
+        '1' { $servers = @('1.1.1.1', '1.0.0.1'); $label = 'Cloudflare' }
+        '2' { $servers = @('8.8.8.8', '8.8.4.4'); $label = 'Google' }
+        '3' { $servers = @(); $label = 'automatico' }
+    }
+    if ($null -eq $servers) { return }
+    foreach ($a in $ad) {
+        if ($servers.Count -eq 0 -and -not $a.DHCPEnabled) {
+            Write-Host ('  ' + $a.Description + ': tiene IP fija, no se puede poner DNS automatico. Se deja como esta.') -ForegroundColor Yellow
+            continue
+        }
+        Step ('DNS ' + $label + ' en ' + $a.Description) {
+            if ($servers.Count -eq 0) { $rv = $a.SetDNSServerSearchOrder($null) } else { $rv = $a.SetDNSServerSearchOrder([string[]]$servers) }
+            if ($rv.ReturnValue -gt 1) { throw ('Windows respondio con el codigo ' + $rv.ReturnValue) }
+        }
+    }
+    Step 'Limpiar cache DNS' { ipconfig /flushdns }
+    Write-Host '  Para deshacerlo, vuelve a esta opcion y elige 3 (Automatico).' -ForegroundColor DarkGray
+}
+
+# Conexiones TCP abiertas (netstat funciona igual de Windows 7 a 11)
+function Get-NetConnections {
+    $rows = @()
+    foreach ($l in @(netstat -ano)) {
+        if ($l -match '^\s*TCP\s+(\S+)\s+(\S+)\s+\S+\s+(\d+)\s*$') {
+            $remote = $matches[2]; $procId = [int]$matches[3]
+            if ($procId -eq 0 -or $remote -match '^(0\.0\.0\.0|\[::\]|127\.|\[::1\]|\*)') { continue }
+            $rows += (New-Object PSObject -Property @{ ProcId = $procId; Remote = $remote })
+        }
+    }
+    return $rows
+}
+
+function T-Connections {
+    Write-Section 'Programas conectados a internet'
+    $rows = @(Get-NetConnections)
+    if ($rows.Count -eq 0) { Write-Host '  Ningun programa esta conectado ahora mismo.'; return }
+    $warn = 0
+    foreach ($g in @($rows | Group-Object ProcId | Sort-Object Count -Descending)) {
+        $p = Get-Process -Id ([int]$g.Name) -ErrorAction SilentlyContinue
+        $name = '(cerrado)'; $path = ''
+        if ($p) { $name = $p.ProcessName; try { $path = [string]$p.Path } catch {} }
+        $dest = (@($g.Group | ForEach-Object { $_.Remote -replace ':\d+$', '' } | Select-Object -Unique) | Select-Object -First 3) -join ', '
+        $odd = ($path -match '\\AppData\\|\\Temp\\|\\Users\\Public\\' -and $path -notmatch '\\Microsoft\\|\\Google\\|\\Mozilla\\|\\Zoom|\\Discord|\\Spotify|\\Teams')
+        $color = 'White'; if ($odd) { $color = 'Yellow'; $warn++ }
+        Write-Host ('   {0,-24} {1,3} conexion(es)   {2}' -f $name, $g.Count, $dest) -ForegroundColor $color
+        if ($odd) { Write-Host ('      ubicacion inusual: ' + $path) -ForegroundColor Yellow }
+    }
+    Write-Log ('Programas conectados: ' + @($rows | Group-Object ProcId).Count + ', con ubicacion inusual: ' + $warn)
+    Write-Host ''
+    if ($warn -gt 0) { Write-Host '  Los programas en amarillo se ejecutan desde una carpeta poco comun. Si no los conoces, usa la opcion 21 (Buscar virus).' -ForegroundColor Yellow }
+    else { Write-Host '  No se ven programas en ubicaciones sospechosas.' -ForegroundColor Green }
+}
+
+$global:HostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
+$global:DefaultHosts = "# Copyright (c) 1993-2009 Microsoft Corp.`r`n#`r`n# This is a sample HOSTS file used by Microsoft TCP/IP for Windows.`r`n#`r`n# localhost name resolution is handled within DNS itself.`r`n#`t127.0.0.1       localhost`r`n#`t::1             localhost`r`n"
+
+function Get-HostsEntries {
+    if (-not (Test-Path -LiteralPath $global:HostsPath)) { return @() }
+    return @([IO.File]::ReadAllLines($global:HostsPath) | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') })
+}
+
+function T-Hosts {
+    Write-Section 'Revisar el archivo hosts'
+    Write-Host '  Algunos virus lo modifican para llevarte a paginas falsas o bloquear el antivirus.' -ForegroundColor DarkGray
+    $e = @(Get-HostsEntries)
+    if ($e.Count -eq 0) { Write-Host '  El archivo hosts esta limpio (sin redirecciones).' -ForegroundColor Green; Write-Log 'hosts limpio'; return }
+    Write-Host ('  Tiene ' + $e.Count + ' redireccion(es):') -ForegroundColor Yellow
+    foreach ($l in ($e | Select-Object -First 25)) { Write-Host ('   ' + $l.Trim()) }
+    if ($e.Count -gt 25) { Write-Host ('   ... y ' + ($e.Count - 25) + ' mas') }
+    Write-Log ('hosts con ' + $e.Count + ' redirecciones')
+    Write-Host '  Si las agrego un programa conocido (bloqueador de publicidad, programa de la empresa), puede ser normal.' -ForegroundColor DarkGray
+    if (Confirm-Action 'Restaurar el archivo hosts original de Windows? (se guarda una copia)' $false $true) {
+        $bk = Join-Path $global:LogDir ('hosts_respaldo_' + (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') + '.txt')
+        Step ('Guardar copia en ' + $bk) { Copy-Item -LiteralPath $global:HostsPath -Destination $bk -Force -ErrorAction Stop }
+        Step 'Restaurar el archivo hosts original' {
+            $item = Get-Item -LiteralPath $global:HostsPath -Force
+            if ($item.IsReadOnly) { $item.IsReadOnly = $false }
+            [IO.File]::WriteAllText($global:HostsPath, $global:DefaultHosts, [Text.Encoding]::ASCII)
+        }
+        Step 'Limpiar cache DNS' { ipconfig /flushdns }
+    }
+}
+
+function Get-ProxyState {
+    $p = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+    return (New-Object PSObject -Property @{ Enabled = ($p.ProxyEnable -eq 1); Server = [string]$p.ProxyServer; Pac = [string]$p.AutoConfigURL })
+}
+
+function T-Proxy {
+    Write-Section 'Revisar el proxy'
+    Write-Host '  Algunos programas de publicidad (adware) ponen un proxy para espiar o cambiar las paginas.' -ForegroundColor DarkGray
+    $s = Get-ProxyState
+    if (-not $s.Enabled -and -not $s.Pac) { Write-Host '  No hay proxy configurado. Todo bien.' -ForegroundColor Green; Write-Log 'Sin proxy'; return }
+    if ($s.Enabled) { Write-Host ('  Proxy ACTIVO: ' + $s.Server) -ForegroundColor Yellow }
+    if ($s.Pac) { Write-Host ('  Configuracion automatica: ' + $s.Pac) -ForegroundColor Yellow }
+    Write-Host '  OJO: en empresas el proxy puede ser necesario. Si este equipo es de una empresa, consulta antes.' -ForegroundColor Yellow
+    if (Confirm-Action 'Quitar el proxy?' $false $true) {
+        Write-Log ('Proxy antes: activo=' + $s.Enabled + ' servidor=' + $s.Server + ' pac=' + $s.Pac)
+        Step 'Desactivar el proxy' { Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' 'ProxyEnable' 0 }
+        Step 'Quitar la configuracion automatica' { Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name 'AutoConfigURL' -ErrorAction SilentlyContinue }
+        Step 'Restablecer el proxy del sistema (WinHTTP)' { netsh winhttp reset proxy }
+        Write-Host '  Cierra y vuelve a abrir el navegador.' -ForegroundColor DarkGray
+    }
+}
+
+function T-Time {
+    Write-Section 'Sincronizar la hora'
+    Write-Host ('  Hora del equipo: ' + (Get-Date -Format 'dd/MM/yyyy HH:mm:ss') + '   Zona horaria: ' + [TimeZone]::CurrentTimeZone.StandardName)
+    Write-Host '  Una hora incorrecta causa errores de "conexion no segura" y fallos de Windows Update y de activacion.' -ForegroundColor DarkGray
+    $cs = Get-CimInstance Win32_ComputerSystem
+    Step 'Iniciar el servicio de hora de Windows' { Set-Service -Name W32Time -StartupType Automatic -ErrorAction SilentlyContinue; Start-Service -Name W32Time -ErrorAction Stop }
+    if ($cs.PartOfDomain) { Write-Host '  El equipo es de una empresa (dominio): se sincroniza con el servidor de la empresa.' -ForegroundColor DarkGray }
+    else { Step 'Usar el servidor de hora de Microsoft' { w32tm /config /syncfromflags:manual /manualpeerlist:time.windows.com /update } }
+    Step 'Sincronizar ahora' { w32tm /resync; if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 3; w32tm /resync /rediscover } }
+    if (-not $global:DryRun) { Write-Host ('  Hora ahora: ' + (Get-Date -Format 'dd/MM/yyyy HH:mm:ss')) -ForegroundColor Green }
+}
+
+function T-DriverUpdates {
+    Write-Section 'Actualizar drivers desde Windows Update'
+    Write-Host '  Busca drivers oficiales publicados por los fabricantes en Windows Update.' -ForegroundColor DarkGray
+    Write-Host '  Buscando (puede tardar unos minutos)...'
+    try {
+        $session = New-Object -ComObject Microsoft.Update.Session
+        $r = $session.CreateUpdateSearcher().Search("IsInstalled=0 and IsHidden=0 and Type='Driver'")
+    } catch { $global:Errors++; Write-Host ('  No se pudo buscar: ' + $_.Exception.Message) -ForegroundColor Red; Write-Log ('[ERROR] Buscar drivers: ' + $_.Exception.Message); return }
+    $ups = @(); foreach ($u in $r.Updates) { $ups += $u }
+    if ($ups.Count -eq 0) { Write-Host '  No hay drivers nuevos en Windows Update. Para versiones mas recientes revisa la web del fabricante.' -ForegroundColor Green; return }
+    for ($i = 0; $i -lt $ups.Count; $i++) { Write-Host ('   {0,2}. {1}' -f ($i + 1), $ups[$i].Title) }
+    $idx = Get-Selection (Read-Host '  Numeros a instalar (ej: 1,3), T = todos, ENTER = ninguno') $ups.Count
+    if ($idx.Count -eq 0) { Write-Host '  No se instalo nada.'; return }
+    if (Confirm-Action 'Crear un punto de restauracion antes (recomendado)?') { X-Restore }
+    if ($global:DryRun) { foreach ($i in $idx) { Write-Host ('  [SIM] Instalar ' + $ups[$i].Title) -ForegroundColor DarkYellow }; return }
+    $coll = New-Object -ComObject Microsoft.Update.UpdateColl
+    foreach ($i in $idx) { try { if (-not $ups[$i].EulaAccepted) { $ups[$i].AcceptEula() } } catch {}; [void]$coll.Add($ups[$i]) }
+    try {
+        Write-Host '  Descargando...'
+        $d = $session.CreateUpdateDownloader(); $d.Updates = $coll; [void]$d.Download()
+        Write-Host '  Instalando...'
+        $in = $session.CreateUpdateInstaller(); $in.Updates = $coll; $res = $in.Install()
+        for ($k = 0; $k -lt $coll.Count; $k++) {
+            $rc = $res.GetUpdateResult($k).ResultCode
+            if ($rc -eq 2 -or $rc -eq 3) { Write-Host ('  OK: ' + $coll.Item($k).Title) -ForegroundColor Green; Add-Result 'OK' ('Driver: ' + $coll.Item($k).Title) '' }
+            else { $global:Warnings++; Write-Host ('  NO se pudo: ' + $coll.Item($k).Title) -ForegroundColor Yellow; Add-Result 'AVISO' 'Driver' $coll.Item($k).Title }
+            Write-Log ('Driver ' + $coll.Item($k).Title + ' -> codigo ' + $rc)
+        }
+        if ($res.RebootRequired) { Write-Host '  Reinicia el equipo para terminar.' -ForegroundColor Yellow }
+    } catch { $global:Errors++; Write-Host ('  ERROR: ' + $_.Exception.Message) -ForegroundColor Red; Write-Log ('[ERROR] Instalar drivers: ' + $_.Exception.Message) }
+}
+
+# Decodifica la clave instalada (algoritmo conocido de DigitalProductId, Windows 7 a 11)
+function Get-InstalledProductKey {
+    $id = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue).DigitalProductId
+    if (-not $id -or $id.Length -lt 67) { return $null }
+    $k = New-Object 'int[]' 15
+    for ($i = 0; $i -lt 15; $i++) { $k[$i] = [int]$id[52 + $i] }
+    $isWin8 = [int]([math]::Floor($k[14] / 6)) -band 1
+    $k[14] = ($k[14] -band 0xF7) -bor (($isWin8 -band 2) * 4)
+    $chars = 'BCDFGHJKMPQRTVWXY2346789'
+    $out = ''; $last = 0
+    for ($i = 24; $i -ge 0; $i--) {
+        $cur = 0
+        for ($j = 14; $j -ge 0; $j--) {
+            $cur = $cur * 256 + $k[$j]
+            $k[$j] = [int][math]::Floor($cur / 24)
+            $cur = $cur % 24
+        }
+        $out = [string]$chars[$cur] + $out
+        $last = $cur
+    }
+    if ($isWin8 -eq 1) {
+        $rest = $out.Substring(1)
+        $out = $rest.Substring(0, $last) + 'N' + $rest.Substring($last)
+    }
+    return ($out.Substring(0, 5) + '-' + $out.Substring(5, 5) + '-' + $out.Substring(10, 5) + '-' + $out.Substring(15, 5) + '-' + $out.Substring(20, 5))
+}
+
+function T-ProductKey {
+    Write-Section 'Clave de producto de Windows'
+    Write-Host '  NO compartas esta pantalla: muestra la clave completa.' -ForegroundColor Yellow
+    Write-Host ''
+    $svc = @(Get-CimInstance SoftwareLicensingService -ErrorAction SilentlyContinue)
+    $oem = ''; if ($svc.Count -gt 0) { $oem = [string]$svc[0].OA3xOriginalProductKey }
+    if ($oem) {
+        Write-Host ('  Clave de fabrica guardada en la BIOS:  ' + $oem) -ForegroundColor Green
+        Write-Host '    Windows la usa sola si reinstalas la misma edicion en este equipo.' -ForegroundColor DarkGray
+    } else {
+        Write-Host '  No hay clave guardada en la BIOS (normal en Windows 7 y en equipos armados).' -ForegroundColor Gray
+        Write-Host '    Busca la etiqueta de licencia (COA) pegada al equipo o al cargador.' -ForegroundColor DarkGray
+    }
+    $lic = @(Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND Name LIKE 'Windows%'" -ErrorAction SilentlyContinue)
+    $inst = Get-InstalledProductKey
+    if ($inst) {
+        $match = $false
+        foreach ($l in $lic) { if ($l.PartialProductKey -and $inst.EndsWith([string]$l.PartialProductKey)) { $match = $true } }
+        Write-Host ''
+        Write-Host ('  Clave instalada en Windows:            ' + $inst) -ForegroundColor Green
+        if ($match) { Write-Host '    Verificada: coincide con la licencia activa.' -ForegroundColor DarkGray }
+        Write-Host '    Si Windows se activo con licencia digital, puede ser una clave generica que no sirve en otro equipo.' -ForegroundColor DarkGray
+    }
+    $map = @{ 0 = 'Sin licencia'; 1 = 'ACTIVADO'; 2 = 'Periodo de gracia'; 3 = 'Gracia adicional'; 4 = 'Gracia (no original)'; 5 = 'NO ACTIVADO'; 6 = 'Gracia extendida' }
+    foreach ($l in $lic) {
+        Write-Host ''
+        Write-Host ('  ' + $l.Name)
+        Write-Host ('    Tipo: ' + $l.Description + '   Estado: ' + $map[[int]$l.LicenseStatus]) -ForegroundColor DarkGray
+    }
+    Write-Log 'Clave de producto consultada (la clave no se guarda en el log)'
+}
+
+function Get-InstalledPrograms {
+    $seen = @{}; $list = @()
+    foreach ($p in @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                                      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                                      'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue)) {
+        $n = [string]$p.DisplayName
+        if (-not $n -or $p.SystemComponent -eq 1 -or $p.ParentKeyName -or $n -match '^(Security Update|Update for|Hotfix)') { continue }
+        if ($seen.ContainsKey($n)) { continue }
+        $seen[$n] = $true
+        $size = ''; if ($p.EstimatedSize) { $size = Format-Size ([double]$p.EstimatedSize * 1KB) }
+        $date = ''; if ([string]$p.InstallDate -match '^\d{8}$') { $d = [string]$p.InstallDate; $date = $d.Substring(6, 2) + '/' + $d.Substring(4, 2) + '/' + $d.Substring(0, 4) }
+        $list += (New-Object PSObject -Property @{ Programa = $n; Version = [string]$p.DisplayVersion; Fabricante = [string]$p.Publisher; Instalado = $date; Tamano = $size })
+    }
+    return @($list | Sort-Object Programa)
+}
+
+function T-ProgramsList {
+    Write-Section 'Lista de programas instalados'
+    $list = @(Get-InstalledPrograms)
+    $file = Join-Path $global:LogDir ('Programas_' + $env:COMPUTERNAME + '_' + (Get-Date -Format 'yyyy-MM-dd_HH-mm') + '.txt')
+    $head = @('PROGRAMAS INSTALADOS - ' + $env:COMPUTERNAME + ' - ' + (Get-Date -Format 'dd/MM/yyyy HH:mm') + ' - MG Toolkit', ('Total: ' + $list.Count), '')
+    $table = $list | Select-Object Programa, Version, Fabricante, Instalado, Tamano | Format-Table -AutoSize | Out-String -Width 250
+    $head + $table | Out-File -FilePath $file -Encoding UTF8 -Width 250
+    Write-Host ('  ' + $list.Count + ' programas instalados.') -ForegroundColor Green
+    Write-Host ('  Lista guardada en: ' + $file)
+    Write-Log ('Lista de programas: ' + $list.Count + ' en ' + $file)
+    Start-Process notepad.exe -ArgumentList ('"' + $file + '"')
+    if (Confirm-Action 'Abrir "Programas y caracteristicas" para desinstalar alguno?') { Start-Process appwiz.cpl }
+}
+
+function Get-SafeBootState {
+    $o = bcdedit /enum '{current}' 2>$null | Out-String
+    if ($o -match 'safeboot\s+(\w+)') { return $matches[1] }
+    return ''
+}
+
+function Restart-Soon([string]$extra = '') {
+    if ($global:DryRun) { Write-Host '  [SIM] Reiniciar el equipo' -ForegroundColor DarkYellow; return }
+    if ($extra) { shutdown /r /t 10 $extra /c "MG Toolkit: el equipo se reinicia en 10 segundos" }
+    else { shutdown /r /t 10 /c "MG Toolkit: el equipo se reinicia en 10 segundos" }
+    Write-Host '  El equipo se reinicia en 10 segundos. Para cancelar escribe: shutdown /a' -ForegroundColor Yellow
+}
+
+function T-Reboot {
+    Write-Section 'Reiniciar en modo especial'
+    $sb = Get-SafeBootState
+    if ($sb) { Write-Host ('  ATENCION: el equipo esta configurado para iniciar SIEMPRE en modo seguro (' + $sb + ').') -ForegroundColor Yellow }
+    Write-Host '   1. Modo seguro             (solo lo basico; para quitar virus o drivers que fallan)'
+    Write-Host '   2. Modo seguro con red     (igual, pero con internet)'
+    Write-Host '   3. Volver al inicio NORMAL (quita el modo seguro)'
+    Write-Host '   4. Entrar a la BIOS / UEFI'
+    Write-Host '   5. Opciones avanzadas de inicio (reparar, restaurar, USB)'
+    Write-Host '   0. Volver'
+    switch ((Read-Host '  Opcion').Trim()) {
+        '1' { Set-SafeBoot 'minimal' }
+        '2' { Set-SafeBoot 'network' }
+        '3' {
+            if (-not $sb) { Write-Host '  Ya inicia en modo normal.' -ForegroundColor Green; return }
+            Step 'Volver al inicio normal' { bcdedit /deletevalue '{current}' safeboot }
+            if (Confirm-Action 'Reiniciar ahora?' $false $true) { Restart-Soon }
+        }
+        '4' {
+            if (-not $global:IsWin8) { Write-Host '  En Windows 7: reinicia y presiona F2, Supr, F10, F12 o Esc al encender (depende de la marca).' -ForegroundColor Yellow; return }
+            if (Confirm-Action 'Reiniciar ahora y entrar a la BIOS? (guarda todo antes)' $false $true) {
+                Step 'Reiniciar a la BIOS / UEFI' { shutdown /r /fw /t 10 }
+                if ($LASTEXITCODE -ne 0) { Write-Host '  Este equipo no lo permite (BIOS antigua): presiona F2, Supr, F10 o Esc al encender.' -ForegroundColor Yellow }
+            }
+        }
+        '5' {
+            if (-not $global:IsWin8) { Write-Host '  En Windows 7: reinicia y presiona F8 repetidamente antes de que aparezca el logo de Windows.' -ForegroundColor Yellow; return }
+            if (Confirm-Action 'Reiniciar ahora en opciones avanzadas? (guarda todo antes)' $false $true) { Restart-Soon '/o' }
+        }
+    }
+}
+
+function Set-SafeBoot([string]$mode) {
+    Write-Host '  El equipo iniciara en modo seguro CADA VEZ hasta que vuelvas a normal:' -ForegroundColor Yellow
+    Write-Host '  abre MG Toolkit en modo seguro, opcion 52 y luego 3 (o ejecuta msconfig > Arranque).' -ForegroundColor Yellow
+    if (Confirm-Action 'Configurar el modo seguro y reiniciar ahora? (guarda todo antes)' $false $true) {
+        Step ('Activar modo seguro (' + $mode + ')') { bcdedit /set '{current}' safeboot $mode }
+        Restart-Soon
+    }
+}
+
+$global:WinTools = @(
+    @('Administrador de dispositivos (drivers)', 'devmgmt.msc', ''),
+    @('Administrador de tareas', 'taskmgr.exe', ''),
+    @('Monitor de recursos (que usa CPU, disco y red)', 'resmon.exe', ''),
+    @('Visor de eventos (errores del sistema)', 'eventvwr.msc', ''),
+    @('Historial de confiabilidad (fallos por fecha)', 'perfmon.exe', '/rel'),
+    @('Servicios', 'services.msc', ''),
+    @('Administracion de discos (particiones)', 'diskmgmt.msc', ''),
+    @('Programas y caracteristicas (desinstalar)', 'appwiz.cpl', ''),
+    @('Conexiones de red', 'ncpa.cpl', ''),
+    @('Opciones de energia', 'powercfg.cpl', ''),
+    @('Propiedades del sistema (nombre, rendimiento)', 'sysdm.cpl', ''),
+    @('Configuracion del sistema (msconfig)', 'msconfig.exe', ''),
+    @('Informacion del sistema (msinfo32)', 'msinfo32.exe', ''),
+    @('Restaurar sistema', 'rstrui.exe', ''),
+    @('Liberador de espacio en disco', 'cleanmgr.exe', ''),
+    @('Editor del registro', 'regedit.exe', ''),
+    @('Programador de tareas', 'taskschd.msc', ''),
+    @('Firewall con seguridad avanzada', 'wf.msc', ''),
+    @('Usuarios y grupos locales (no en ediciones Home)', 'lusrmgr.msc', ''),
+    @('Directivas de grupo (no en ediciones Home)', 'gpedit.msc', ''),
+    @('Panel de control', 'control.exe', ''),
+    @('Simbolo del sistema (administrador)', 'cmd.exe', '')
+)
+
+function T-WinTools {
+    while ($true) {
+        Show-Header
+        Write-Group 'HERRAMIENTAS DE WINDOWS (se abren en otra ventana)'
+        Write-Host ''
+        for ($i = 0; $i -lt $global:WinTools.Count; $i++) { Write-Opt ([string]($i + 1)) $global:WinTools[$i][0] }
+        Write-Host ''
+        Write-Opt '0' 'Volver al menu principal'
+        Write-Host ''
+        $s = Read-Host '   Escribe el numero y presiona ENTER'
+        $n = 0
+        if (-not [int]::TryParse($s, [ref]$n) -or $n -lt 1 -or $n -gt $global:WinTools.Count) { return }
+        $t = $global:WinTools[$n - 1]
+        try {
+            if ($t[2]) { Start-Process -FilePath $t[1] -ArgumentList $t[2] -ErrorAction Stop } else { Start-Process -FilePath $t[1] -ErrorAction Stop }
+            Write-Log ('Abierto: ' + $t[0])
+        } catch { Write-Host '   No esta disponible en esta edicion de Windows.' -ForegroundColor Yellow; Start-Sleep -Seconds 2 }
+    }
+}
+
 function Invoke-Task([string]$name, [scriptblock]$body, [switch]$Simple) {
     $global:Freed = [int64]0; $global:Errors = 0; $global:Warnings = 0; $global:YesAll = $false
     Clear-Host
@@ -2628,6 +3083,7 @@ function Show-Header {
     Write-Host '  ==================================================================' -ForegroundColor Cyan
     Write-Host ('   Equipo: ' + $env:COMPUTERNAME + '   |   RAM libre: ' + $ram.Libre + ' de ' + $ram.Total + ' GB   |   Libre en ' + $env:SystemDrive + ' ' + (Format-Size $c.Free)) -ForegroundColor Gray
     if ($global:DryRun) { Write-Host '   MODO SIMULACION ACTIVADO: solo muestra lo que haria, no cambia nada ' -ForegroundColor Black -BackgroundColor Yellow }
+    if (Get-SafeBootState) { Write-Host '   ATENCION: el equipo arranca siempre en MODO SEGURO. Para volver a normal: opcion 52 y luego 3 ' -ForegroundColor Black -BackgroundColor Yellow }
 }
 
 function Write-Group([string]$t) { Write-Host ''; Write-Host ('   ' + $t) -ForegroundColor Cyan }
@@ -2750,7 +3206,7 @@ try {
     $raw.BufferSize = $buf
     $win = $raw.WindowSize
     $win.Width  = [math]::Min(100, $max.Width)
-    $win.Height = [math]::Min(50, $max.Height)
+    $win.Height = [math]::Min(54, $max.Height)
     $raw.WindowSize = $win
 } catch {}
 
@@ -2815,7 +3271,16 @@ while ($true) {
         (New-MH 'ACTUALIZAR E INSTALAR'),
         (New-MI '18' 'Instalar actualizaciones de Windows'),
         (New-MI '19' 'Actualizar todos los programas'),
-        (New-MI '20' 'Instalar programas basicos')
+        (New-MI '20' 'Instalar programas basicos'),
+        (New-MI '49' 'Actualizar drivers (Windows Update)'),
+        $null,
+        (New-MH 'RED E INTERNET'),
+        (New-MI '43' 'Probar internet (velocidad y fallas)'),
+        (New-MI '44' 'Cambiar DNS (paginas mas rapidas)'),
+        (New-MI '45' 'Programas conectados a internet'),
+        (New-MI '46' 'Revisar archivo hosts (virus)'),
+        (New-MI '47' 'Quitar proxy (publicidad)'),
+        (New-MI '48' 'Sincronizar la hora')
     )
     $R = @(
         (New-MH 'SEGURIDAD Y RESPALDO'),
@@ -2840,6 +3305,8 @@ while ($true) {
         (New-MI '35' 'Reporte de bateria'),
         (New-MI '36' 'Ver si Windows esta activado'),
         (New-MI '37' 'Contrasenas y reporte de WiFi'),
+        (New-MI '50' 'Clave de producto de Windows'),
+        (New-MI '51' 'Lista de programas instalados'),
         $null,
         (New-MH 'OTROS'),
         (New-MI '38' 'Mantenimiento automatico semanal'),
@@ -2847,6 +3314,8 @@ while ($true) {
         (New-MI '40' 'Abrir carpeta de informes'),
         (New-MI '41' 'Opciones avanzadas'),
         (New-MI '42' 'Ver el manual'),
+        (New-MI '52' 'Reiniciar en modo seguro / BIOS'),
+        (New-MI '53' 'Herramientas de Windows (atajos)'),
         (New-MI '0' 'Salir')
     )
     Write-Host ''
@@ -2907,6 +3376,17 @@ while ($true) {
         '40' { Start-Process explorer.exe $global:LogDir }
         '41' { Show-Advanced }
         '42' { Open-Manual }
+        '43' { Invoke-Task 'Probar internet' { T-SpeedTest } -Simple }
+        '44' { Invoke-Task 'Cambiar DNS' { T-DNS } }
+        '45' { Invoke-Task 'Programas conectados a internet' { T-Connections } -Simple }
+        '46' { Invoke-Task 'Revisar archivo hosts' { T-Hosts } }
+        '47' { Invoke-Task 'Revisar proxy' { T-Proxy } }
+        '48' { Invoke-Task 'Sincronizar la hora' { T-Time } }
+        '49' { Invoke-Task 'Actualizar drivers' { T-DriverUpdates } }
+        '50' { Invoke-Task 'Clave de producto' { T-ProductKey } -Simple }
+        '51' { Invoke-Task 'Programas instalados' { T-ProgramsList } -Simple }
+        '52' { Invoke-Task 'Reiniciar en modo especial' { T-Reboot } -Simple }
+        '53' { T-WinTools }
         '0'  { Write-Log 'Programa cerrado por el usuario'; exit 0 }
         default {
             if ($op) { Write-Host ('   "' + $op + '" no es una opcion valida. Escribe solo el numero, por ejemplo: 4') -ForegroundColor Red; Start-Sleep -Seconds 2 }

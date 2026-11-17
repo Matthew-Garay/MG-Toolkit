@@ -28,10 +28,14 @@ Cuando el programa pregunta, responde:
 |---|---|
 | PC lenta | **3** para ver la causa, luego **1** (preguntando) o **2** (automático) |
 | Mantenimiento de un cliente | **2**: lo hace todo solo (30 a 90 min) y entrega un informe |
-| Antes de formatear | **23** archivos → **24** drivers → **37** claves WiFi → **34** número de serie |
-| Después de formatear | **24** drivers → **18** actualizaciones → **20** programas → **9** quitar apps basura |
+| Antes de formatear | **23** archivos → **24** drivers → **37** claves WiFi → **50** clave de Windows → **51** lista de programas |
+| Después de formatear | **24** drivers → **18** actualizaciones → **49** drivers faltantes → **20** programas → **9** apps basura |
 | Virus | **21** (si alguno "no se pudo eliminar", usa el análisis sin conexión) |
-| Sin internet | **28** y reinicia |
+| Publicidad o páginas que llevan a otro sitio | **21** → **45** → **46** → **47** |
+| Internet lento | **43** para ver la causa → **44** si el DNS es lento |
+| "Conexión no segura" en todas las páginas | **48** (hora incorrecta) |
+| Sin internet | **43** → **28** y reinicia |
+| Virus que no se deja borrar | **52** → modo seguro → **21** |
 | Impresora trabada | **30** |
 | Windows Update falla | **29** → reiniciar → **18** |
 | Disco lleno | **4** → **8** → **7** |
@@ -64,6 +68,15 @@ Cuando el programa pregunta, responde:
 - **18** Actualizaciones de Windows
 - **19** Actualizar programas
 - **20** Instalar programas básicos (Chrome, 7-Zip, VLC, AnyDesk…)
+- **49** Actualizar drivers desde Windows Update (eliges cuáles; crea un punto de restauración antes)
+
+**Red e internet**
+- **43** Probar internet: router, pérdida de paquetes, DNS y velocidad de descarga, con el diagnóstico
+- **44** Cambiar DNS a Cloudflare o Google, o volver a automático (no toca equipos con IP fija)
+- **45** Programas conectados a internet (marca en amarillo los que están en carpetas sospechosas)
+- **46** Revisar el archivo hosts y restaurarlo si un virus lo cambió (guarda una copia)
+- **47** Quitar el proxy que pone la publicidad (adware)
+- **48** Sincronizar la hora
 
 **Seguridad y respaldo**
 - **21** Buscar virus (rápido, completo o sin conexión)
@@ -82,9 +95,11 @@ Cuando el programa pregunta, responde:
 - **32** Restablecer el firewall (borra las reglas de los programas)
 - **33** Probar la memoria RAM (reinicia el equipo)
 
-**Información:** **34** datos del equipo · **35** batería · **36** activación · **37** contraseñas WiFi (solo en pantalla)
+**Información:** **34** datos del equipo · **35** batería · **36** activación · **37** contraseñas WiFi · **50** clave de producto de Windows · **51** lista de programas instalados (se guarda en un archivo). Las claves y contraseñas solo se muestran en pantalla, nunca se guardan.
 
-**Otros:** **38** mantenimiento semanal automático · **39** modo simulación · **40** carpeta de informes · **41** opciones avanzadas · **42** este manual
+**Otros:** **38** mantenimiento semanal automático · **39** modo simulación · **40** carpeta de informes · **41** opciones avanzadas · **42** este manual · **52** reiniciar en modo seguro, BIOS u opciones avanzadas (y volver a normal) · **53** atajos a 22 herramientas de Windows (dispositivos, eventos, discos, servicios…)
+
+> Si usas el **modo seguro (52)**, el equipo arrancará así cada vez hasta que vuelvas a normal con **52 → 3**. El menú muestra un aviso mientras esté activo.
 
 ## 4. El informe
 
@@ -126,6 +141,8 @@ El programa detecta la versión de Windows y se adapta solo. En las versiones an
 | Respaldar drivers (24) | No: descárgalos de la web del fabricante | Solo 8.1 |
 | Actualizar e instalar programas (19, 20) | Muestra los enlaces de descarga | Muestra los enlaces de descarga |
 | Reporte de batería y de WiFi | No | Sí |
+| Entrar a la BIOS / opciones avanzadas (52) | No: pulsa F2, Supr o F8 al encender | Sí |
+| Clave de producto en la BIOS (50) | No (se muestra la instalada) | Sí |
 
 > **Windows 7 y 8 ya no reciben parches de seguridad.** El informe lo marca como problema crítico y recomienda pasar a Windows 11 si el equipo es compatible.
 
