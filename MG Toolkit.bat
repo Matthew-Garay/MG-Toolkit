@@ -19,7 +19,7 @@ exit /b
 #>
 
 # =====================================================================
-#   MG Toolkit - Herramientas de Limpieza y Optimizacion de Windows 10 / 11
+#   MG Toolkit - Herramientas de Limpieza y Optimizacion de Windows 7 / 8 / 8.1 / 10 / 11
 #   Creado por Matthew Garay
 #   Uso:  "MG Toolkit.bat"                    (normal, con menu)
 #         "MG Toolkit.bat" --dry-run          (simulacion: no cambia nada)
@@ -39,6 +39,94 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     Write-Host 'ERROR: Este programa debe ejecutarse como Administrador.' -ForegroundColor Red
     Read-Host 'Presiona ENTER para salir' | Out-Null
     exit 1
+}
+
+# ---------- Compatibilidad: Windows 7 / 8 / 8.1 / 10 / 11 ----------
+$global:WinBuild = [int](Get-WmiObject Win32_OperatingSystem).BuildNumber
+$global:IsWin8   = ($global:WinBuild -ge 9200)     # Windows 8 o superior
+$global:IsWin81  = ($global:WinBuild -ge 9600)     # Windows 8.1 o superior
+$global:IsWin10  = ($global:WinBuild -ge 10240)    # Windows 10 o superior
+$global:WinName  = 'Windows 11'
+if ($global:WinBuild -lt 22000) { $global:WinName = 'Windows 10' }
+if ($global:WinBuild -lt 10240) { $global:WinName = 'Windows 8.1' }
+if ($global:WinBuild -lt 9600)  { $global:WinName = 'Windows 8' }
+if ($global:WinBuild -lt 9200)  { $global:WinName = 'Windows 7' }
+$global:Is64 = ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'AMD64' -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64')
+$global:Win7StartupStore = 'HKLM:\SOFTWARE\MGToolkit\InicioDesactivado'
+
+# PowerShell 2.0 (Windows 7) no tiene Get-CimInstance: se usa WMI y se convierten las fechas
+if (-not (Get-Command Get-CimInstance -ErrorAction SilentlyContinue)) {
+    function Get-CimInstance {
+        [CmdletBinding()]
+        param([Parameter(Position = 0)][string]$ClassName, [string]$Filter, [string]$Namespace = 'root\cimv2')
+        $p = @{ Class = $ClassName; Namespace = $Namespace }
+        if ($Filter) { $p['Filter'] = $Filter }
+        foreach ($o in @(Get-WmiObject @p)) {
+            $h = @{}
+            foreach ($prop in $o.PSObject.Properties) {
+                if ($prop.Name -like '__*') { continue }
+                $v = $prop.Value
+                if ($v -is [string] -and $v -match '^\d{14}\.\d{6}[\+\-]\d{3}$') { try { $v = [Management.ManagementDateTimeConverter]::ToDateTime($v) } catch {} }
+                $h[$prop.Name] = $v
+            }
+            New-Object PSObject -Property $h
+        }
+    }
+}
+
+# PowerShell 2.0 no tiene Get-ChildItem -File / -Directory
+if ($PSVersionTable.PSVersion.Major -lt 3) {
+    function Get-ChildItem {
+        [CmdletBinding()]
+        param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [Parameter(Position = 1)][string]$Filter,
+              [switch]$Recurse, [switch]$Force, [switch]$File, [switch]$Directory)
+        $p = @{}
+        if ($Path) { $p['Path'] = $Path }
+        if ($LiteralPath) { $p['LiteralPath'] = $LiteralPath }
+        if ($Filter) { $p['Filter'] = $Filter }
+        if ($Recurse) { $p['Recurse'] = $true }
+        if ($Force) { $p['Force'] = $true }
+        if ($File) { Microsoft.PowerShell.Management\Get-ChildItem @p | Where-Object { -not $_.PSIsContainer } }
+        elseif ($Directory) { Microsoft.PowerShell.Management\Get-ChildItem @p | Where-Object { $_.PSIsContainer } }
+        else { Microsoft.PowerShell.Management\Get-ChildItem @p }
+    }
+}
+
+function Test-Cmd([string]$name) { return [bool](Get-Command $name -ErrorAction SilentlyContinue) }
+
+function Show-NotSupported([string]$what) {
+    Write-Host ('  ' + $what + ' no esta disponible en ' + $global:WinName + '.') -ForegroundColor Yellow
+    Write-Log ('[NO DISPONIBLE] ' + $what + ' en ' + $global:WinName)
+}
+
+function Get-FreeBytes([string]$drive = $env:SystemDrive) {
+    $d = @(Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='" + $drive.TrimEnd('\') + "'"))
+    if ($d.Count -gt 0) { return [double]$d[0].FreeSpace }
+    return [double]0
+}
+
+# Tipo de inicio de un servicio (funciona en todas las versiones): Automatic / Manual / Disabled
+function Get-SvcStartMode([string]$name) {
+    $s = @(Get-CimInstance Win32_Service -Filter ("Name='" + $name + "'"))
+    if ($s.Count -eq 0) { return '' }
+    switch ([string]$s[0].StartMode) { 'Auto' { return 'Automatic' } 'Manual' { return 'Manual' } 'Disabled' { return 'Disabled' } default { return [string]$s[0].StartMode } }
+}
+
+# Discos en Windows 7 (no existe Get-PhysicalDisk). Status = "Pred Fail" cuando el disco avisa que va a fallar.
+function Get-Win7Disks {
+    foreach ($d in @(Get-CimInstance Win32_DiskDrive)) {
+        $bad = ([string]$d.Status -ne 'OK')
+        $salud = 'Saludable'; if ($bad) { $salud = 'CON PROBLEMAS (' + $d.Status + ')' }
+        New-Object PSObject -Property @{ Disco = [string]$d.Model; 'Tamano (GB)' = [math]::Round([double]$d.Size / 1GB); Salud = $salud; Falla = $bad }
+    }
+}
+
+# Antivirus de Microsoft por linea de comandos (Microsoft Security Essentials en Windows 7, Defender en 8)
+function Get-MpCmdRun {
+    foreach ($p in @("$env:ProgramFiles\Microsoft Security Client\MpCmdRun.exe", "$env:ProgramFiles\Windows Defender\MpCmdRun.exe")) {
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    return $null
 }
 
 # ---------- Configuracion global y log ----------
@@ -112,7 +200,7 @@ function Confirm-Action([string]$q, [bool]$autoAnswer = $false, [bool]$risky = $
 }
 
 function Add-Result([string]$st, [string]$desc, [string]$msg) {
-    [void]$global:StepLog.Add([pscustomobject]@{ Estado = $st; Tarea = $desc; Detalle = $msg })
+    [void]$global:StepLog.Add((New-Object PSObject -Property @{ Estado = $st; Tarea = $desc; Detalle = $msg }))
 }
 
 function Wait-Enter { Write-Host ''; Read-Host '  Presiona ENTER para continuar' | Out-Null }
@@ -246,10 +334,10 @@ function Start-ExplorerIfNeeded {
 
 function Get-RamStatus {
     $os = Get-CimInstance Win32_OperatingSystem
-    [pscustomobject]@{
+    (New-Object PSObject -Property @{
         Total = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
         Libre = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
-    }
+    })
 }
 
 function Get-StandbyMB {
@@ -415,7 +503,7 @@ function M2-Pagefile {
     }
     Write-Host '  Tiene un tamano manual. Lo recomendado es que Windows lo ajuste segun la necesidad.' -ForegroundColor Yellow
     if (Confirm-Action 'Cambiar a tamano administrado por Windows? (se aplica al reiniciar)' $true) {
-        Step 'Paginacion administrada automaticamente' { Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $true } }
+        Step 'Paginacion administrada automaticamente' { $w = Get-WmiObject Win32_ComputerSystem; $w.AutomaticManagedPagefile = $true; [void]$w.Put() }
     }
 }
 
@@ -430,7 +518,7 @@ function M2-KillBloat {
     if ($global:Auto) {
         # En modo automatico no se cierran programas que el usuario puede estar usando
         $userApps = @('steam', 'Discord', 'Spotify', 'EpicGamesLauncher', 'EADesktop', 'Origin', 'Battle.net', 'UbisoftConnect', 'upc', 'RiotClientServices')
-        $names = @($names | Where-Object { $_ -notin $userApps })
+        $names = @($names | Where-Object { ($userApps) -notcontains ($_) })
     }
     $running = @(Get-Process -Name $names -ErrorAction SilentlyContinue | Group-Object ProcessName)
     if ($running.Count -eq 0) { Write-Host '  No hay procesos innecesarios abiertos.' -ForegroundColor Green; Write-Log 'Sin procesos bloatware'; return }
@@ -480,8 +568,8 @@ function M2-Hibernate {
     Write-Host '   0. No cambiar'
     switch (Read-Host '  Opcion') {
         '1' { Step 'Desactivar hibernacion' { powercfg /h off } }
-        '2' { Step 'Hibernacion reducida' { powercfg /h on; powercfg /h /type reduced } }
-        '3' { Step 'Activar hibernacion completa' { powercfg /h on; powercfg /h /type full } }
+        '2' { if (-not $global:IsWin10) { Show-NotSupported 'La hibernacion reducida'; return }; Step 'Hibernacion reducida' { powercfg /h on; powercfg /h /type reduced } }
+        '3' { Step 'Activar hibernacion completa' { powercfg /h on; if ($global:IsWin10) { powercfg /h /type full } } }
         default { Write-Log '[OMITIDO] Hibernacion' }
     }
 }
@@ -500,9 +588,11 @@ function M2-Timer {
 
 function M2-Clipboard {
     Step 'Vaciar portapapeles' { Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::Clear() }
-    Step 'Borrar historial del portapapeles (Win+V)' {
-        $null = [Windows.ApplicationModel.DataTransfer.Clipboard, Windows.ApplicationModel.DataTransfer, ContentType = WindowsRuntime]
-        $null = [Windows.ApplicationModel.DataTransfer.Clipboard]::ClearHistory()
+    if ($global:IsWin10) {
+        Step 'Borrar historial del portapapeles (Win+V)' {
+            $null = [Windows.ApplicationModel.DataTransfer.Clipboard, Windows.ApplicationModel.DataTransfer, ContentType = WindowsRuntime]
+            $null = [Windows.ApplicationModel.DataTransfer.Clipboard]::ClearHistory()
+        }
     }
 }
 
@@ -516,15 +606,15 @@ function M2-Leak {
     $rows = Get-Process | Group-Object ProcessName | ForEach-Object {
         $ws = ($_.Group | Measure-Object WorkingSet64 -Sum).Sum
         $pv = ($_.Group | Measure-Object PrivateMemorySize64 -Sum).Sum
-        [pscustomobject]@{
+        (New-Object PSObject -Property @{
             'Proceso'      = $_.Name
             'Instancias'   = $_.Count
             'RAM (MB)'     = [math]::Round($ws / 1MB)
             'Privada (MB)' = [math]::Round($pv / 1MB)
             '% RAM'        = [math]::Round($ws * 100 / $total, 1)
-        }
+        })
     } | Sort-Object 'RAM (MB)' -Descending
-    $rows | Select-Object -First 12 | Show-Table
+    $rows | Select-Object -First 12 | Select-Object Proceso, Instancias, 'RAM (MB)', 'Privada (MB)', '% RAM' | Show-Table
     $heavy = @($rows | Where-Object { $_.'% RAM' -ge 20 })
     if ($heavy.Count -gt 0) {
         foreach ($h in $heavy) {
@@ -542,6 +632,7 @@ function M2-Leak {
 #   MODULO 3: REPARACION Y SALUD DEL SISTEMA
 # =====================================================================
 function M3-DISM {
+    if (-not $global:IsWin8) { Show-NotSupported 'La reparacion con DISM'; Write-Host '  En Windows 7 se usa SFC, que es el siguiente paso.' -ForegroundColor DarkGray; return }
     Invoke-Live 'DISM: reparar imagen de Windows (10-30 min)' 'dism.exe' '/Online /Cleanup-Image /RestoreHealth'
     if (-not $global:DryRun) { $global:Results['DISM'] = $global:LastLive }
 }
@@ -549,10 +640,14 @@ function M3-SFC {
     Invoke-Live 'SFC: verificar archivos del sistema' 'sfc.exe' '/scannow'
     if (-not $global:DryRun) { $global:Results['SFC'] = $global:LastLive }
 }
-function M3-Components { Invoke-Live 'DISM: limpiar almacen de componentes' 'dism.exe' '/Online /Cleanup-Image /StartComponentCleanup' }
+function M3-Components {
+    if (-not $global:IsWin8) { Show-NotSupported 'La limpieza de componentes de Windows'; return }
+    Invoke-Live 'DISM: limpiar almacen de componentes' 'dism.exe' '/Online /Cleanup-Image /StartComponentCleanup'
+}
 
 function M3-Chkdsk {
-    Invoke-Live 'CHKDSK: escaneo en linea de C: (sin reiniciar)' 'chkdsk.exe' "$env:SystemDrive /scan"
+    if ($global:IsWin8) { Invoke-Live 'CHKDSK: escaneo en linea de C: (sin reiniciar)' 'chkdsk.exe' "$env:SystemDrive /scan" }
+    else { Invoke-Live 'CHKDSK: revision de solo lectura de C: (puede tardar)' 'chkdsk.exe' "$env:SystemDrive" }
     $code = $global:LastLive
     if (-not $global:DryRun) { $global:Results['CHKDSK'] = $code }
     $needs = ($null -ne $code -and $code -ge 3)
@@ -566,21 +661,26 @@ function M3-Chkdsk {
     }
 }
 
-function M3-Defrag { Invoke-Live 'Optimizar todas las unidades (SSD = TRIM, HDD = desfragmentar)' 'defrag.exe' '/C /O /U' }
+function M3-Defrag {
+    if ($global:IsWin8) { Invoke-Live 'Optimizar todas las unidades (SSD = TRIM, HDD = desfragmentar)' 'defrag.exe' '/C /O /U'; return }
+    # Windows 7 no distingue los SSD al desfragmentar a mano: solo se analiza, para no desgastar un SSD
+    Invoke-Live 'Analizar la fragmentacion de las unidades (Windows 7: solo analisis)' 'defrag.exe' '/C /A /U'
+    Write-Host '  En Windows 7 solo se analiza. Si el disco es mecanico (HDD) y sale muy fragmentado,' -ForegroundColor DarkGray
+    Write-Host '  desfragmentalo desde Propiedades del disco > Herramientas. NUNCA desfragmentes un SSD.' -ForegroundColor DarkGray
+}
 
 function M3-Network {
     Write-Section 'Restaurar la pila de red'
     Write-Host '  NOTA: si estas conectado por acceso remoto (AnyDesk, TeamViewer...) la conexion se cortara.' -ForegroundColor Yellow
     # Proteccion: "netsh int ip reset" BORRA las IP fijas. Si hay alguna, se guardan y NO se resetea TCP/IP.
-    $static = @(Get-NetIPInterface -AddressFamily IPv4 -ConnectionState Connected -ErrorAction SilentlyContinue |
-                Where-Object { [string]$_.Dhcp -eq 'Disabled' -and $_.InterfaceAlias -notmatch 'Loopback' })
+    $static = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled = TRUE' -ErrorAction SilentlyContinue |
+                Where-Object { -not $_.DHCPEnabled -and @($_.IPAddress).Count -gt 0 })
     if ($static.Count -gt 0) {
         $ipFile = Join-Path $global:LogDir ('IP_fija_' + $env:COMPUTERNAME + '_' + (Get-Date -Format 'yyyy-MM-dd_HH-mm') + '.txt')
         ipconfig /all | Out-File -FilePath $ipFile -Encoding ASCII
         Write-Host '  ATENCION: este equipo tiene IP FIJA en:' -ForegroundColor Yellow
         foreach ($s in $static) {
-            $cfg = Get-NetIPConfiguration -InterfaceIndex $s.InterfaceIndex -ErrorAction SilentlyContinue
-            Write-Host ('   - {0}: IP {1}  Puerta de enlace {2}  DNS {3}' -f $s.InterfaceAlias, (($cfg.IPv4Address | ForEach-Object { $_.IPAddress }) -join ', '), (($cfg.IPv4DefaultGateway | ForEach-Object { $_.NextHop }) -join ', '), (($cfg.DNSServer | Where-Object { $_.AddressFamily -eq 2 } | ForEach-Object { $_.ServerAddresses }) -join ', ')) -ForegroundColor Yellow
+            Write-Host ('   - {0}: IP {1}  Puerta de enlace {2}  DNS {3}' -f $s.Description, (@($s.IPAddress) -join ', '), (@($s.DefaultIPGateway) -join ', '), (@($s.DNSServerSearchOrder) -join ', ')) -ForegroundColor Yellow
         }
         Write-Host ('  Se guardo la configuracion en: ' + $ipFile) -ForegroundColor Yellow
         Write-Host '  Para no perder la IP fija, se hara solo la reparacion segura (DNS, Winsock), sin resetear TCP/IP.' -ForegroundColor Yellow
@@ -636,7 +736,7 @@ function M3-Services {
     foreach ($s in $list) {
         $n = $s[0]
         $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
-        if ($svc -and $svc.StartType -ne 'Disabled') { Step ('Reiniciar ' + $s[1]) { Restart-Service -Name $n -Force -ErrorAction Stop } }
+        if ($svc -and (Get-SvcStartMode $n) -ne 'Disabled') { Step ('Reiniciar ' + $s[1]) { Restart-Service -Name $n -Force -ErrorAction Stop } }
     }
 }
 
@@ -703,39 +803,77 @@ function Get-StartupEntries {
         if (Test-Path $s.K) {
             $key = Get-Item -Path $s.K
             foreach ($n in $key.GetValueNames()) {
-                if ($n) { $list += [pscustomobject]@{ Nombre = $n; Origen = $s.O; Comando = [string]$key.GetValue($n); Aprob = $s.A; Estado = 'Activo' } }
+                if ($n) { $list += (New-Object PSObject -Property @{ Nombre = $n; Origen = $s.O; Comando = [string]$key.GetValue($n); Aprob = $s.A; Estado = 'Activo'; Tipo = 'Reg'; K = $s.K }) }
             }
         }
     }
     $folders = @(
-        @{ O = 'Carpeta Inicio';         P = [Environment]::GetFolderPath('Startup');       A = "$base\Explorer\StartupApproved\StartupFolder" },
-        @{ O = 'Carpeta Inicio (todos)'; P = [Environment]::GetFolderPath('CommonStartup'); A = "$lm\Explorer\StartupApproved\StartupFolder" }
+        @{ O = 'Carpeta Inicio';         P = [Environment]::GetFolderPath('Startup');                                         A = "$base\Explorer\StartupApproved\StartupFolder" },
+        @{ O = 'Carpeta Inicio (todos)'; P = (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\StartUp'); A = "$lm\Explorer\StartupApproved\StartupFolder" }
     )
     foreach ($f in $folders) {
         if ($f.P -and (Test-Path -LiteralPath $f.P)) {
             foreach ($file in @(Get-ChildItem -LiteralPath $f.P -File -Force -ErrorAction SilentlyContinue)) {
-                if ($file.Name -ne 'desktop.ini') { $list += [pscustomobject]@{ Nombre = $file.Name; Origen = $f.O; Comando = $file.FullName; Aprob = $f.A; Estado = 'Activo' } }
+                if ($file.Name -ne 'desktop.ini') { $list += (New-Object PSObject -Property @{ Nombre = $file.Name; Origen = $f.O; Comando = $file.FullName; Aprob = $f.A; Estado = 'Activo'; Tipo = 'File'; K = $f.P }) }
+            }
+            # Windows 7: lo desactivado por MG Toolkit se guarda en una subcarpeta (Windows no la ejecuta)
+            $off = Join-Path $f.P 'MGToolkit_Desactivados'
+            if (-not $global:IsWin8 -and (Test-Path -LiteralPath $off)) {
+                foreach ($file in @(Get-ChildItem -LiteralPath $off -File -Force -ErrorAction SilentlyContinue)) {
+                    $list += (New-Object PSObject -Property @{ Nombre = $file.Name; Origen = $f.O; Comando = $file.FullName; Aprob = ''; Estado = 'DESACTIVADO'; Tipo = 'File'; K = $f.P })
+                }
             }
         }
     }
-    foreach ($e in $list) {
-        $v = $null
-        try { $v = (Get-ItemProperty -Path $e.Aprob -Name $e.Nombre -ErrorAction Stop).($e.Nombre) } catch {}
-        if ($v -and $v.Length -gt 0 -and ($v[0] % 2) -eq 1) { $e.Estado = 'DESACTIVADO' }
+    if ($global:IsWin8) {
+        foreach ($e in $list) {
+            $v = $null
+            try { $v = (Get-ItemProperty -Path $e.Aprob -Name $e.Nombre -ErrorAction Stop).($e.Nombre) } catch {}
+            if ($v -and $v.Length -gt 0 -and ($v[0] % 2) -eq 1) { $e.Estado = 'DESACTIVADO' }
+        }
+    } elseif (Test-Path $global:Win7StartupStore) {
+        # Windows 7: entradas del registro desactivadas por MG Toolkit (guardadas para poder reactivarlas)
+        $key = Get-Item -Path $global:Win7StartupStore
+        foreach ($n in $key.GetValueNames()) {
+            $parts = ([string]$key.GetValue($n)).Split([char]'|', 2)
+            if ($parts.Length -eq 2) {
+                $list += (New-Object PSObject -Property @{ Nombre = $n; Origen = 'Registro'; Comando = $parts[1]; Aprob = ''; Estado = 'DESACTIVADO'; Tipo = 'Reg'; K = $parts[0] })
+            }
+        }
     }
     return $list
 }
 
 function Set-StartupApproved($e, [bool]$enable) {
-    if (-not (Test-Path $e.Aprob)) { New-Item -Path $e.Aprob -Force | Out-Null }
-    $first = 3; if ($enable) { $first = 2 }
-    New-ItemProperty -Path $e.Aprob -Name $e.Nombre -Value ([byte[]]@($first, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) -PropertyType Binary -Force | Out-Null
+    if (($enable -and $e.Estado -eq 'Activo') -or (-not $enable -and $e.Estado -eq 'DESACTIVADO')) { return }
+    if ($global:IsWin8) {
+        if (-not (Test-Path $e.Aprob)) { New-Item -Path $e.Aprob -Force | Out-Null }
+        $first = 3; if ($enable) { $first = 2 }
+        New-ItemProperty -Path $e.Aprob -Name $e.Nombre -Value ([byte[]]@($first, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) -PropertyType Binary -Force | Out-Null
+        return
+    }
+    # Windows 7: se mueve la entrada a un lugar seguro y se puede devolver con "A numero"
+    if ($e.Tipo -eq 'File') {
+        $off = Join-Path $e.K 'MGToolkit_Desactivados'
+        if ($enable) { Move-Item -LiteralPath $e.Comando -Destination (Join-Path $e.K $e.Nombre) -Force -ErrorAction Stop }
+        else {
+            if (-not (Test-Path -LiteralPath $off)) { New-Item -ItemType Directory -Path $off | Out-Null }
+            Move-Item -LiteralPath $e.Comando -Destination (Join-Path $off $e.Nombre) -Force -ErrorAction Stop
+        }
+    } elseif ($enable) {
+        New-ItemProperty -Path $e.K -Name $e.Nombre -Value $e.Comando -PropertyType String -Force -ErrorAction Stop | Out-Null
+        Remove-ItemProperty -Path $global:Win7StartupStore -Name $e.Nombre -ErrorAction SilentlyContinue
+    } else {
+        if (-not (Test-Path $global:Win7StartupStore)) { New-Item -Path $global:Win7StartupStore -Force | Out-Null }
+        New-ItemProperty -Path $global:Win7StartupStore -Name $e.Nombre -Value ($e.K + '|' + $e.Comando) -PropertyType String -Force -ErrorAction Stop | Out-Null
+        Remove-ItemProperty -Path $e.K -Name $e.Nombre -ErrorAction Stop
+    }
 }
-
 function Get-StartupTasks {
+    if (-not (Test-Cmd 'Get-ScheduledTask')) { return @() }
     @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
         $_.TaskPath -notlike '\Microsoft\*' -and
-        @($_.Triggers | Where-Object { $_.CimClass.CimClassName -in @('MSFT_TaskLogonTrigger', 'MSFT_TaskBootTrigger') }).Count -gt 0
+        @($_.Triggers | Where-Object { (@('MSFT_TaskLogonTrigger', 'MSFT_TaskBootTrigger')) -contains ($_.CimClass.CimClassName) }).Count -gt 0
     })
 }
 
@@ -767,8 +905,8 @@ function M4-Startup {
         if (-not $c) { return }
         if ($c -match '^\s*(TD|TA|D|A|V)\s*(\d+)\s*$') {
             $cmd = $matches[1].ToUpper(); $n = [int]$matches[2]
-            if ($cmd -in @('D', 'A', 'V') -and ($n -lt 1 -or $n -gt $entries.Count)) { continue }
-            if ($cmd -in @('TD', 'TA') -and ($n -lt 1 -or $n -gt $tasks.Count)) { continue }
+            if ((@('D', 'A', 'V')) -contains ($cmd) -and ($n -lt 1 -or $n -gt $entries.Count)) { continue }
+            if ((@('TD', 'TA')) -contains ($cmd) -and ($n -lt 1 -or $n -gt $tasks.Count)) { continue }
             switch ($cmd) {
                 'D'  { $e = $entries[$n - 1]; Step ('Desactivar inicio: ' + $e.Nombre) { Set-StartupApproved $e $false } }
                 'A'  { $e = $entries[$n - 1]; Step ('Activar inicio: ' + $e.Nombre) { Set-StartupApproved $e $true } }
@@ -782,12 +920,15 @@ function M4-Startup {
 
 function M4-Game {
     Write-Section 'Modo Juego y prioridad de GPU'
+    if (-not $global:IsWin10) { Write-Host '  El Modo Juego y la programacion de GPU son de Windows 10/11: se omiten.' -ForegroundColor DarkGray }
+    if ($global:IsWin10) {
     Step 'Activar Modo Juego' {
         Set-Reg 'HKCU:\Software\Microsoft\GameBar' 'AutoGameModeEnabled' 1
         Set-Reg 'HKCU:\Software\Microsoft\GameBar' 'AllowAutoGameMode' 1
     }
     Step 'Programacion de GPU acelerada por hardware (si la tarjeta lo soporta)' {
         Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' 'HwSchMode' 2
+    }
     }
     Step 'Prioridad alta de CPU y GPU para juegos y apps exigentes' {
         $mm = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
@@ -821,8 +962,9 @@ function M4-Telemetry {
         @('\Microsoft\Windows\DiskDiagnostic\', 'Microsoft-Windows-DiskDiagnosticDataCollector'))
     foreach ($t in $tasks) {
         $tp = $t[0]; $tn = $t[1]
-        if (Get-ScheduledTask -TaskPath $tp -TaskName $tn -ErrorAction SilentlyContinue) {
-            Step ('Desactivar tarea de telemetria: ' + $tn) { Disable-ScheduledTask -TaskPath $tp -TaskName $tn -ErrorAction Stop | Out-Null }
+        $null = schtasks.exe /Query /TN ($tp + $tn) 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Step ('Desactivar tarea de telemetria: ' + $tn) { schtasks.exe /Change /TN ($tp + $tn) /Disable }
         }
     }
 }
@@ -850,7 +992,7 @@ function M4-Services {
         Write-Section 'Control de servicios opcionales'
         for ($i = 0; $i -lt $svcs.Count; $i++) {
             $s = Get-Service -Name $svcs[$i][0] -ErrorAction SilentlyContinue
-            if ($s) { $est = [string]$s.Status; $ini = [string]$s.StartType } else { $est = 'No existe'; $ini = '' }
+            if ($s) { $est = [string]$s.Status; $ini = Get-SvcStartMode $svcs[$i][0] } else { $est = 'No existe'; $ini = '' }
             Write-Host ('  {0,2}. {1,-46} {2,-10} {3}' -f ($i + 1), $svcs[$i][1], $est, $ini)
         }
         Write-Host ''
@@ -904,7 +1046,11 @@ function X-Info {
     foreach ($m in $mods) { Write-Host ('     - {0} GB  {1} MHz  {2}' -f ($m.Capacity / 1GB), $m.Speed, $m.Manufacturer) }
     Write-Host ''
     Write-Host '  Discos fisicos:' -ForegroundColor Cyan
-    Get-PhysicalDisk | Select-Object FriendlyName, MediaType, @{ n = 'Tamano (GB)'; e = { [math]::Round($_.Size / 1GB) } }, HealthStatus | Show-Table
+    if (Test-Cmd 'Get-PhysicalDisk') {
+        Get-PhysicalDisk | Select-Object FriendlyName, MediaType, @{ n = 'Tamano (GB)'; e = { [math]::Round($_.Size / 1GB) } }, HealthStatus | Show-Table
+    } else {
+        Get-Win7Disks | Select-Object Disco, 'Tamano (GB)', Salud | Show-Table
+    }
     try {
         Get-PhysicalDisk | Get-StorageReliabilityCounter -ErrorAction Stop |
             Select-Object @{ n = 'Disco'; e = { $_.DeviceId } }, @{ n = 'Desgaste %'; e = { $_.Wear } }, @{ n = 'Temp C'; e = { $_.Temperature } }, @{ n = 'Errores lectura'; e = { $_.ReadErrorsUncorrected } }, @{ n = 'Horas uso'; e = { $_.PowerOnHours } } | Show-Table
@@ -930,12 +1076,18 @@ function X-Battery {
         }
     } catch {}
     $out = Join-Path $global:LogDir ('reporte_bateria_' + (Get-Date -Format 'yyyy-MM-dd_HH-mm') + '.html')
+    if (-not $global:IsWin8) { Show-NotSupported 'El reporte completo de bateria'; return }
     powercfg /batteryreport /output "$out" | Out-Null
     if (Test-Path -LiteralPath $out) { Write-Host ('  Reporte completo: ' + $out); Start-Process $out }
 }
 
 function X-Winget {
     Write-Section 'Actualizar todos los programas'
+    if (-not $global:IsWin10) {
+        Show-NotSupported 'La actualizacion automatica de programas (winget)'
+        Write-Host '  Actualiza cada programa desde su menu Ayuda > Buscar actualizaciones o desde su pagina oficial.' -ForegroundColor DarkGray
+        return
+    }
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Host '  winget no esta instalado. Instala "Instalador de aplicacion" (App Installer) desde la Microsoft Store.' -ForegroundColor Yellow
         return
@@ -983,7 +1135,7 @@ function Preset-Guided {
     $global:Results = @{}
     $global:StepLog.Clear()
     $global:Results['Inicio']     = Get-Date
-    $global:Results['LibreAntes'] = (Get-PSDrive -Name ($env:SystemDrive.TrimEnd(':'))).Free
+    $global:Results['LibreAntes'] = (Get-FreeBytes)
     $global:Results['RamAntes']   = (Get-RamStatus).Libre
     Write-Host ''
     Write-Host '  Se preguntara antes de cada paso. Responde:' -ForegroundColor Cyan
@@ -1035,7 +1187,7 @@ function Preset-Guided {
 
 # Cierre comun: informe final, instalar lo que falta y ofrecer reinicio
 function Complete-Run {
-    $global:Results['LibreDespues'] = (Get-PSDrive -Name ($env:SystemDrive.TrimEnd(':'))).Free
+    $global:Results['LibreDespues'] = (Get-FreeBytes)
     $global:Results['RamDespues']   = (Get-RamStatus).Libre
     New-Report
     Install-Missing
@@ -1128,11 +1280,11 @@ function Get-SevRank([string]$s) {
 }
 
 function Add-Check([string]$cat, [string]$item, [string]$status, [string]$detail, [string]$rec = '') {
-    [void]$global:Checks.Add([pscustomobject]@{ Categoria = $cat; Elemento = $item; Estado = $status; Detalle = $detail; Recomendacion = $rec })
+    [void]$global:Checks.Add((New-Object PSObject -Property @{ Categoria = $cat; Elemento = $item; Estado = $status; Detalle = $detail; Recomendacion = $rec }))
 }
 
 function Add-Missing([string]$name, [string]$id, [string]$rec) {
-    [void]$global:Missing.Add([pscustomobject]@{ Nombre = $name; Id = $id; Rec = $rec })
+    [void]$global:Missing.Add((New-Object PSObject -Property @{ Nombre = $name; Id = $id; Rec = $rec }))
 }
 
 function Get-Ev([hashtable]$h) { try { return @(Get-WinEvent -FilterHashtable $h -ErrorAction Stop) } catch { return @() } }
@@ -1172,12 +1324,15 @@ function Get-Diagnostics {
     $cs = Get-CimInstance Win32_ComputerSystem
     $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     $build = [int]$os.BuildNumber
-    $ver = [string]$cv.DisplayVersion; if (-not $ver) { $ver = [string]$cv.ReleaseId }
-    $verTxt = $os.Caption + ' ' + $ver + ' (build ' + $build + '.' + $cv.UBR + ')'
+    $ver = [string]$cv.DisplayVersion; if (-not $ver) { $ver = [string]$cv.ReleaseId }; if (-not $ver) { $ver = [string]$os.CSDVersion }
+    $ubr = ''; if ($cv.UBR) { $ubr = '.' + $cv.UBR }
+    $verTxt = $os.Caption + ' ' + $ver + ' (build ' + $build + $ubr + ')'
 
     # ------------------------- WINDOWS -------------------------
     if ($build -lt 22000) {
-        Add-Check 'Windows' 'Version de Windows' 'CRITICO' $verTxt 'Windows 10 ya no recibe parches de seguridad gratuitos (fin de soporte oct. 2025; ESU hogar hasta oct. 2026). Pasar a Windows 11 si el equipo es compatible.'
+        $why = 'Windows 10 ya no recibe parches de seguridad gratuitos (fin de soporte oct. 2025; ESU hogar hasta oct. 2026). Pasar a Windows 11 si el equipo es compatible.'
+        if ($build -lt 10240) { $why = $global:WinName + ' no recibe parches de seguridad desde hace anos (Windows 7: 2020, Windows 8/8.1: 2023). Es peligroso usarlo en internet: pasar a Windows 11 si el equipo es compatible, o renovar el equipo.' }
+        Add-Check 'Windows' 'Version de Windows' 'CRITICO' $verTxt $why
         $tpm2 = $false
         try {
             $tpm = Get-CimInstance -Namespace 'root\cimv2\security\microsofttpm' -ClassName Win32_Tpm -ErrorAction Stop
@@ -1203,7 +1358,7 @@ function Get-Diagnostics {
     else { Add-Check 'Windows' 'Activacion' 'CRITICO' 'Windows NO esta activado' 'Activar Windows con una licencia original (Configuracion > Activacion).' }
 
     $wu = Get-Service -Name wuauserv -ErrorAction SilentlyContinue
-    if ($wu -and [string]$wu.StartType -eq 'Disabled') { Add-Check 'Windows' 'Servicio Windows Update' 'CRITICO' 'Deshabilitado' 'Volver a habilitarlo: sin el, Windows no recibe parches de seguridad.' }
+    if ($wu -and (Get-SvcStartMode 'wuauserv') -eq 'Disabled') { Add-Check 'Windows' 'Servicio Windows Update' 'CRITICO' 'Deshabilitado' 'Volver a habilitarlo: sin el, Windows no recibe parches de seguridad.' }
     if (-not $global:Results.ContainsKey('WU_Restantes') -and -not $global:Results.ContainsKey('WU_Error')) {
         Write-Host '  Consultando actualizaciones pendientes (puede tardar)...'
         try { $global:Results['WU_Restantes'] = @(Get-PendingUpdates | ForEach-Object { $_.Title }) }
@@ -1230,7 +1385,7 @@ function Get-Diagnostics {
     $avList = @()
     foreach ($a in @(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue)) {
         $hex = '{0:X6}' -f [int]$a.productState
-        $avList += [pscustomobject]@{ N = $a.displayName; On = ($hex.Substring(2, 2) -in @('10', '11')); Upd = ($hex.Substring(4, 2) -eq '00') }
+        $avList += (New-Object PSObject -Property @{ N = $a.displayName; On = ((@('10', '11')) -contains ($hex.Substring(2, 2))); Upd = ($hex.Substring(4, 2) -eq '00') })
     }
     $good = @($avList | Where-Object { $_.On -and $_.Upd })
     $on   = @($avList | Where-Object { $_.On })
@@ -1249,7 +1404,11 @@ function Get-Diagnostics {
         elseif ($det.Count -gt 0) { Add-Check 'Seguridad' 'Virus (30 dias)' 'INFO' ([string]$det.Count + ' amenaza(s) detectada(s) y eliminada(s)') 'Revisar de donde vinieron (descargas, USB) y hacer un analisis completo.' }
         else { Add-Check 'Seguridad' 'Virus (30 dias)' 'OK' 'No se detectaron amenazas' }
     } catch {}
-    $fwOff = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { [string]$_.Enabled -eq 'False' })
+    $fwOff = @()
+    foreach ($fp in @(@('Dominio', 'DomainProfile'), @('Privado', 'StandardProfile'), @('Publico', 'PublicProfile'))) {
+        $en = (Get-ItemProperty ('HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\' + $fp[1]) -Name EnableFirewall -ErrorAction SilentlyContinue).EnableFirewall
+        if ($en -eq 0) { $fwOff += (New-Object PSObject -Property @{ Name = $fp[0] }) }
+    }
     if ($fwOff.Count -gt 0) { $d = 'Desactivado en: ' + (($fwOff | ForEach-Object { $_.Name }) -join ', '); Add-Check 'Seguridad' 'Firewall' 'ATENCION' $d 'Activar el firewall de Windows (salvo que haya otro firewall instalado).' }
     else { Add-Check 'Seguridad' 'Firewall' 'OK' 'Activo en todos los perfiles' }
     $lua = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
@@ -1267,7 +1426,8 @@ function Get-Diagnostics {
 
     $sysDisk = $null
     try { $sysDisk = (Get-Partition -DriveLetter ($env:SystemDrive.TrimEnd(':')) -ErrorAction Stop).DiskNumber } catch {}
-    foreach ($pd in @(Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
+    $pdList = @(); if (Test-Cmd 'Get-PhysicalDisk') { $pdList = @(Get-PhysicalDisk -ErrorAction SilentlyContinue) }
+    foreach ($pd in $pdList) {
         $type = [string]$pd.MediaType
         if ($type -ne 'HDD' -and $type -ne 'SSD') { if ([string]$pd.BusType -eq 'NVMe' -or $pd.SpindleSpeed -eq 0) { $type = 'SSD' } else { $type = 'desconocido' } }
         $dn = $pd.FriendlyName + ' (' + $type + ', ' + [math]::Round($pd.Size / 1GB) + ' GB)'
@@ -1285,6 +1445,14 @@ function Get-Diagnostics {
         } catch {}
     }
 
+    if ($pdList.Count -eq 0) {
+        foreach ($d in @(Get-Win7Disks)) {
+            $dn = $d.Disco + ' (' + $d.'Tamano (GB)' + ' GB)'
+            if ($d.Falla) { Add-Check 'Hardware' 'Salud del disco' 'CRITICO' ($dn + ': ' + $d.Salud) 'El disco esta fallando: respaldar los datos YA y reemplazarlo.' }
+            else { Add-Check 'Hardware' 'Salud del disco' 'OK' ($dn + ': saludable') }
+        }
+        Add-Check 'Hardware' 'Tipo de disco' 'INFO' ('En ' + $global:WinName + ' no se puede saber si es SSD o HDD') 'Usa "Medir velocidad del disco": si sale LENTO es un disco mecanico y conviene cambiarlo por un SSD.'
+    }
     $c = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='" + $env:SystemDrive + "'")
     $pct = [math]::Round($c.FreeSpace * 100 / $c.Size); $freeGB = [math]::Round($c.FreeSpace / 1GB, 1)
     $d = ('{0} GB libres ({1}%)' -f $freeGB, $pct)
@@ -1292,7 +1460,7 @@ function Get-Diagnostics {
     elseif ($freeGB -lt 25 -or $pct -lt 15)  { Add-Check 'Hardware' ('Espacio en ' + $env:SystemDrive) 'ATENCION' $d 'Poco espacio: Windows necesita al menos 15-20% libre para actualizarse y funcionar bien.' }
     else                                     { Add-Check 'Hardware' ('Espacio en ' + $env:SystemDrive) 'OK' $d }
 
-    $bad = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object { $_.ConfigManagerErrorCode -and $_.ConfigManagerErrorCode -notin @(0, 22, 45) })
+    $bad = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object { $_.ConfigManagerErrorCode -and (@(0, 22, 45)) -notcontains ($_.ConfigManagerErrorCode) })
     $noDrv = @($bad | Where-Object { $_.ConfigManagerErrorCode -eq 28 })
     $other = @($bad | Where-Object { $_.ConfigManagerErrorCode -ne 28 })
     if ($noDrv.Count -gt 0) {
@@ -1375,7 +1543,7 @@ function Get-Diagnostics {
 
     # ------------------------- INTERNET -------------------------
     $ping = Test-Connection -ComputerName 1.1.1.1 -Count 2 -Quiet -ErrorAction SilentlyContinue
-    $dns = $false; try { $null = Resolve-DnsName 'www.microsoft.com' -DnsOnly -QuickTimeout -ErrorAction Stop; $dns = $true } catch {}
+    $dns = $false; try { $null = [System.Net.Dns]::GetHostAddresses('www.microsoft.com'); $dns = $true } catch {}
     if ($dns)      { Add-Check 'Red' 'Internet' 'OK' 'Conexion y DNS funcionando' }
     elseif ($ping) { Add-Check 'Red' 'Internet' 'ATENCION' 'Hay conexion pero el DNS falla' 'Usar Modulo 3 > Restaurar la pila de red, o configurar DNS 1.1.1.1 / 8.8.8.8.' }
     else           { Add-Check 'Red' 'Internet' 'CRITICO' 'Sin conexion a internet' 'Revisar cable/WiFi/router; luego Modulo 3 > Restaurar la pila de red.' }
@@ -1385,7 +1553,7 @@ function Get-Diagnostics {
                                'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
                                'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
               Where-Object { $_.DisplayName } | ForEach-Object { [string]$_.DisplayName })
-    $is64 = [Environment]::Is64BitOperatingSystem
+    $is64 = $global:Is64
     $vcRx = 'Visual C\+\+ (20(15|17|19|22)|v14)'
     $vc64 = ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64' -ErrorAction SilentlyContinue).Installed -eq 1) -or (@($apps | Where-Object { $_ -match ($vcRx + '.*x64') }).Count -gt 0)
     $vc86key = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86'
@@ -1417,13 +1585,17 @@ function Get-Diagnostics {
         @{ N = 'Compresor de archivos (7-Zip)'; Ok = $zip; S = 'INFO'; W = 'Para abrir .rar, .7z y otros formatos comprimidos.'; Id = '7zip.7zip' },
         @{ N = 'winget (instalador de programas)'; Ok = $wg; S = 'ATENCION'; W = 'Instalar "Instalador de aplicacion" desde Microsoft Store: permite actualizar todos los programas.'; Id = '' }
     )
+    if (-not $global:IsWin10) {
+        # En Windows 7/8 estos ya no existen o no tienen soporte: no se piden
+        $soft = @($soft | Where-Object { @('.NET Desktop Runtime', 'Microsoft Edge WebView2', 'winget (instalador de programas)') -notcontains $_.N })
+    }
     foreach ($s in $soft) {
         if ($s.Ok) { Add-Check 'Programas esenciales' $s.N 'OK' 'Instalado' }
         else { Add-Check 'Programas esenciales' $s.N $s.S 'No instalado' $s.W; Add-Missing $s.N $s.Id $s.W }
     }
 }
 
-function Enc-Html([string]$s) { return [System.Net.WebUtility]::HtmlEncode($s) }
+function Enc-Html([string]$s) { return [System.Security.SecurityElement]::Escape($s) }
 
 function Write-HtmlReport([int]$score, [string]$label) {
     $os   = Get-CimInstance Win32_OperatingSystem
@@ -1498,7 +1670,8 @@ code{background:#f6f8fa;border:1px solid #d0d7de;padding:1px 6px;border-radius:4
         & $add '<h2>Herramientas y programas que faltan</h2><table><tr><th>Programa</th><th>Para que sirve</th><th>Como instalarlo</th></tr>'
         foreach ($m in $global:Missing) {
             $how = 'Windows Update / Microsoft Store'
-            if ($m.Id) { $how = '<code>winget install --id ' + (Enc-Html $m.Id) + ' -e</code>' }
+            if (-not $global:IsWin10) { $how = 'Descargar desde la pagina oficial' }
+            if ($m.Id -and $global:IsWin10) { $how = '<code>winget install --id ' + (Enc-Html $m.Id) + ' -e</code>' }
             & $add ('<tr><td>' + (Enc-Html $m.Nombre) + '</td><td>' + (Enc-Html $m.Rec) + '</td><td>' + $how + '</td></tr>')
         }
         & $add '</table>'
@@ -1592,7 +1765,7 @@ function Preset-Auto {
     $global:Results = @{}
     $global:StepLog.Clear()
     $global:Results['Inicio']     = Get-Date
-    $global:Results['LibreAntes'] = (Get-PSDrive -Name ($env:SystemDrive.TrimEnd(':'))).Free
+    $global:Results['LibreAntes'] = (Get-FreeBytes)
     $global:Results['RamAntes']   = (Get-RamStatus).Libre
     $global:Auto = $true
     try {
@@ -1645,13 +1818,13 @@ function Select-Destination([string]$what, [double]$needBytes = 0) {
     Write-Host ''
     Write-Host ('  Donde guardar ' + $what + '?') -ForegroundColor Cyan
     $opts = @()
-    foreach ($d in @(Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DriveType -in @(2, 3) -and $_.DeviceID -ne $env:SystemDrive -and $_.Size -gt 0 })) {
+    foreach ($d in @(Get-CimInstance Win32_LogicalDisk | Where-Object { (@(2, 3)) -contains ($_.DriveType) -and $_.DeviceID -ne $env:SystemDrive -and $_.Size -gt 0 })) {
         $tipo = 'Disco'; if ($d.DriveType -eq 2) { $tipo = 'USB / extraible' }
         $label = [string]$d.VolumeName; if (-not $label) { $label = 'sin nombre' }
-        $opts += [pscustomobject]@{ Path = ($d.DeviceID + '\'); Text = ('{0}\  {1} "{2}"  -  {3} libres' -f $d.DeviceID, $tipo, $label, (Format-Size $d.FreeSpace)); Free = [double]$d.FreeSpace }
+        $opts += (New-Object PSObject -Property @{ Path = ($d.DeviceID + '\'); Text = ('{0}\  {1} "{2}"  -  {3} libres' -f $d.DeviceID, $tipo, $label, (Format-Size $d.FreeSpace)); Free = [double]$d.FreeSpace })
     }
-    $sysFree = [double](Get-PSDrive -Name ($env:SystemDrive.TrimEnd(':'))).Free
-    $opts += [pscustomobject]@{ Path = [Environment]::GetFolderPath('Desktop'); Text = ('Escritorio de este equipo  -  NO sirve si vas a formatear'); Free = $sysFree }
+    $sysFree = [double](Get-FreeBytes)
+    $opts += (New-Object PSObject -Property @{ Path = [Environment]::GetFolderPath('Desktop'); Text = ('Escritorio de este equipo  -  NO sirve si vas a formatear'); Free = $sysFree })
     for ($i = 0; $i -lt $opts.Count; $i++) { Write-Host ('   {0}. {1}' -f ($i + 1), $opts[$i].Text) }
     Write-Host '   R. Escribir otra ruta'
     Write-Host '   0. Cancelar'
@@ -1709,6 +1882,15 @@ function Show-Threats([int]$Days = 30) {
 function T-DefenderQuick {
     Write-Section 'Analisis rapido de virus (Microsoft Defender)'
     $mp = Get-DefenderStatus
+    $mpc = Get-MpCmdRun
+    if (-not $mp -and $mpc) {
+        # Windows 7 (Security Essentials) u 8: se usa el antivirus por linea de comandos
+        Invoke-Live 'Actualizar la base de virus' $mpc '-SignatureUpdate'
+        Write-Host '     Analizando... tarda de 5 a 15 minutos. No cierres esta ventana.' -ForegroundColor DarkGray
+        Invoke-Live 'Analisis rapido de virus' $mpc '-Scan -ScanType 1'
+        if ($global:LastLive -eq 2) { Write-Host '  SE ENCONTRARON AMENAZAS: abre el antivirus para ver cuales y si se eliminaron.' -ForegroundColor Red }
+        return
+    }
     if (-not $mp -or -not $mp.AntivirusEnabled) {
         Write-Host '  Microsoft Defender no esta activo (el equipo usa otro antivirus). Se omite.' -ForegroundColor Yellow
         Write-Log 'Defender no activo: analisis omitido'
@@ -1723,6 +1905,20 @@ function T-DefenderQuick {
 function T-Defender {
     Write-Section 'Buscar virus con Microsoft Defender'
     $mp = Get-DefenderStatus
+    $mpc = Get-MpCmdRun
+    if (-not $mp -and $mpc) {
+        Write-Host ('  Antivirus de Microsoft encontrado (' + $global:WinName + ').')
+        Write-Host '   1. Analisis RAPIDO   (5-15 min)'
+        Write-Host '   2. Analisis COMPLETO (1-3 horas)'
+        Write-Host '   0. Volver'
+        $op = (Read-Host '  Opcion').Trim()
+        if ($op -ne '1' -and $op -ne '2') { return }
+        Invoke-Live 'Actualizar la base de virus' $mpc '-SignatureUpdate'
+        Write-Host '     Analizando... no cierres esta ventana.' -ForegroundColor DarkGray
+        Invoke-Live 'Analisis de virus' $mpc ('-Scan -ScanType ' + $op)
+        if ($global:LastLive -eq 2) { Write-Host '  SE ENCONTRARON AMENAZAS: abre el antivirus para ver cuales y si se eliminaron.' -ForegroundColor Red }
+        return
+    }
     if (-not $mp -or -not $mp.AntivirusEnabled) {
         Write-Host '  Microsoft Defender no esta activo: este equipo usa otro antivirus.' -ForegroundColor Yellow
         Write-Host '  Haz el analisis desde ese antivirus.' -ForegroundColor Yellow
@@ -1804,13 +2000,18 @@ function Get-InstalledBloat {
     $found = @()
     foreach ($b in $global:BloatApps) {
         $pk = @(Get-AppxPackage -AllUsers -Name $b.P -ErrorAction SilentlyContinue)
-        if ($pk.Count -gt 0) { $found += [pscustomobject]@{ N = $b.N; P = $b.P } }
+        if ($pk.Count -gt 0) { $found += (New-Object PSObject -Property @{ N = $b.N; P = $b.P }) }
     }
     return $found
 }
 
 function T-Bloat {
     Write-Section 'Quitar aplicaciones basura de fabrica'
+    if (-not $global:IsWin8) {
+        Show-NotSupported 'Quitar apps de la Tienda'
+        Write-Host '  Windows 7 no tiene apps de la Tienda. Para quitar programas usa Panel de control > Programas.' -ForegroundColor DarkGray
+        return
+    }
     Write-Host '  Buscando aplicaciones innecesarias...'
     $found = @(Get-InstalledBloat)
     if ($found.Count -eq 0) { Write-Host '  No hay aplicaciones basura instaladas. Todo limpio.' -ForegroundColor Green; return }
@@ -1822,7 +2023,8 @@ function T-Bloat {
     foreach ($i in $idx) {
         $b = $found[$i]
         Step ('Quitar ' + $b.N) {
-            Get-AppxPackage -AllUsers -Name $b.P -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction Stop
+            if ((Get-Command Remove-AppxPackage).Parameters.ContainsKey('AllUsers')) { Get-AppxPackage -AllUsers -Name $b.P -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction Stop }
+            else { Get-AppxPackage -Name $b.P -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction Stop }
             Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like $b.P } |
                 Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Out-Null
         }
@@ -1835,18 +2037,18 @@ function T-Bloat {
 # Rx = como aparece en "Programas instalados" de Windows (se usa para saber si ya esta instalado;
 # winget no reconoce los programas que se instalaron sin el, por eso no se usa "winget list")
 $global:BasicApps = @(
-    @{ N = 'Google Chrome';                       Rx = @('^Google Chrome');                Ids = @('Google.Chrome') },
-    @{ N = 'Mozilla Firefox';                     Rx = @('^Mozilla Firefox');              Ids = @('Mozilla.Firefox') },
-    @{ N = '7-Zip (abrir .zip / .rar / .7z)';     Rx = @('^7-Zip');                        Ids = @('7zip.7zip') },
-    @{ N = 'VLC (videos y musica)';               Rx = @('^VLC media player');             Ids = @('VideoLAN.VLC') },
-    @{ N = 'Adobe Acrobat Reader (PDF)';          Rx = @('^Adobe Acrobat');                Ids = @('Adobe.Acrobat.Reader.64-bit') },
-    @{ N = 'LibreOffice (Office gratuito)';       Rx = @('^LibreOffice');                  Ids = @('TheDocumentFoundation.LibreOffice') },
-    @{ N = 'AnyDesk (soporte remoto)';            Rx = @('^AnyDesk');                      Ids = @('AnyDesk.AnyDesk') },
-    @{ N = 'TeamViewer (soporte remoto)';         Rx = @('^TeamViewer');                   Ids = @('TeamViewer.TeamViewer') },
-    @{ N = 'Zoom (videollamadas)';                Rx = @('^Zoom');                         Ids = @('Zoom.Zoom') },
-    @{ N = 'Notepad++ (editor de texto)';         Rx = @('^Notepad\+\+');                  Ids = @('Notepad++.Notepad++') },
-    @{ N = 'Visual C++ 2015-2022 (x64 y x86)';    Rx = @('Visual C\+\+ (20(15|17|19|22)|v14).*x64', 'Visual C\+\+ (20(15|17|19|22)|v14).*x86'); Ids = @('Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86') },
-    @{ N = 'Microsoft Edge WebView2';             Rx = @('^Microsoft Edge WebView2');      Ids = @('Microsoft.EdgeWebView2Runtime') }
+    @{ N = 'Google Chrome';                       Rx = @('^Google Chrome');                Ids = @('Google.Chrome'); Url = 'https://www.google.com/chrome' },
+    @{ N = 'Mozilla Firefox';                     Rx = @('^Mozilla Firefox');              Ids = @('Mozilla.Firefox'); Url = 'https://www.mozilla.org/firefox' },
+    @{ N = '7-Zip (abrir .zip / .rar / .7z)';     Rx = @('^7-Zip');                        Ids = @('7zip.7zip'); Url = 'https://www.7-zip.org' },
+    @{ N = 'VLC (videos y musica)';               Rx = @('^VLC media player');             Ids = @('VideoLAN.VLC'); Url = 'https://www.videolan.org' },
+    @{ N = 'Adobe Acrobat Reader (PDF)';          Rx = @('^Adobe Acrobat');                Ids = @('Adobe.Acrobat.Reader.64-bit'); Url = 'https://get.adobe.com/reader' },
+    @{ N = 'LibreOffice (Office gratuito)';       Rx = @('^LibreOffice');                  Ids = @('TheDocumentFoundation.LibreOffice'); Url = 'https://www.libreoffice.org' },
+    @{ N = 'AnyDesk (soporte remoto)';            Rx = @('^AnyDesk');                      Ids = @('AnyDesk.AnyDesk'); Url = 'https://anydesk.com' },
+    @{ N = 'TeamViewer (soporte remoto)';         Rx = @('^TeamViewer');                   Ids = @('TeamViewer.TeamViewer'); Url = 'https://www.teamviewer.com' },
+    @{ N = 'Zoom (videollamadas)';                Rx = @('^Zoom');                         Ids = @('Zoom.Zoom'); Url = 'https://zoom.us/download' },
+    @{ N = 'Notepad++ (editor de texto)';         Rx = @('^Notepad\+\+');                  Ids = @('Notepad++.Notepad++'); Url = 'https://notepad-plus-plus.org' },
+    @{ N = 'Visual C++ 2015-2022 (x64 y x86)';    Rx = @('Visual C\+\+ (20(15|17|19|22)|v14).*x64', 'Visual C\+\+ (20(15|17|19|22)|v14).*x86'); Ids = @('Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86'); Url = 'https://aka.ms/vs/17/release/vc_redist.x64.exe' },
+    @{ N = 'Microsoft Edge WebView2';             Rx = @('^Microsoft Edge WebView2');      Ids = @('Microsoft.EdgeWebView2Runtime'); Url = 'https://developer.microsoft.com/microsoft-edge/webview2' }
 )
 
 function Get-InstalledProgramNames {
@@ -1864,7 +2066,10 @@ function Test-AppInstalled([string[]]$rx, [string[]]$names) {
 function T-BasicApps {
     Write-Section 'Instalar programas basicos'
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Host '  Falta winget. Instala "Instalador de aplicacion" (App Installer) desde la Microsoft Store y vuelve a intentar.' -ForegroundColor Yellow
+        if ($global:IsWin10) { Write-Host '  Falta winget. Instala "Instalador de aplicacion" (App Installer) desde la Microsoft Store y vuelve a intentar.' -ForegroundColor Yellow; return }
+        Write-Host ('  En ' + $global:WinName + ' no existe el instalador automatico (winget). Descargalos desde su pagina oficial:') -ForegroundColor Yellow
+        foreach ($a in $global:BasicApps) { if ($a.Url) { Write-Host ('   - {0,-38} {1}' -f $a.N, $a.Url) } }
+        Write-Host '  OJO: muchos programas nuevos ya no funcionan en Windows 7/8; busca la ultima version compatible.' -ForegroundColor DarkGray
         return
     }
     $names = Get-InstalledProgramNames
@@ -1879,7 +2084,7 @@ function T-BasicApps {
     foreach ($a in $global:BasicApps) {
         $inst = Test-AppInstalled $a.Rx $names
         if ($a.Ids -contains 'Microsoft.EdgeWebView2Runtime') { $inst = ($inst -or $wv2) }
-        $rows += [pscustomobject]@{ N = $a.N; Ids = $a.Ids; Inst = $inst }
+        $rows += (New-Object PSObject -Property @{ N = $a.N; Ids = $a.Ids; Inst = $inst })
     }
     for ($i = 0; $i -lt $rows.Count; $i++) {
         if ($rows[$i].Inst) { Write-Host ('   {0,2}. {1,-40} ya instalado' -f ($i + 1), $rows[$i].N) -ForegroundColor DarkGray }
@@ -1907,13 +2112,19 @@ function T-Drivers {
     Write-Host '   0. Volver'
     switch ((Read-Host '  Opcion').Trim()) {
         '1' {
+            if (-not $global:IsWin81) {
+                Show-NotSupported 'Respaldar drivers'
+                Write-Host '  Descarga los drivers del modelo desde la web del fabricante y guardalos en la USB antes de formatear.' -ForegroundColor DarkGray
+                return
+            }
             $base = Select-Destination 'el respaldo de drivers'
             if (-not $base) { Write-Host '  Cancelado.'; return }
             $dest = Join-Path $base ('Drivers_' + $env:COMPUTERNAME + '_' + (Get-Date -Format 'yyyy-MM-dd'))
             Step ('Crear carpeta ' + $dest) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-            Invoke-Live 'Copiar todos los drivers instalados (1-5 minutos)' 'pnputil.exe' ('/export-driver * "' + $dest + '"')
+            if ($global:IsWin10) { Invoke-Live 'Copiar todos los drivers instalados (1-5 minutos)' 'pnputil.exe' ('/export-driver * "' + $dest + '"') }
+            else { Invoke-Live 'Copiar todos los drivers instalados (1-5 minutos)' 'dism.exe' ('/Online /Export-Driver /Destination:"' + $dest + '"') }
             if ($global:DryRun) { return }
-            if ($global:LastLive -ne 0) { Step 'Copiar drivers (metodo alternativo)' { Export-WindowsDriver -Online -Destination $dest -ErrorAction Stop | Out-Null } }
+            if ($global:LastLive -ne 0 -and (Test-Cmd 'Export-WindowsDriver')) { Step 'Copiar drivers (metodo alternativo)' { Export-WindowsDriver -Online -Destination $dest -ErrorAction Stop | Out-Null } }
             $infs = @(Get-ChildItem -LiteralPath $dest -Recurse -Filter *.inf -ErrorAction SilentlyContinue).Count
             $size = [double](Get-ChildItem -LiteralPath $dest -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
             $cs = Get-CimInstance Win32_ComputerSystem
@@ -1941,7 +2152,12 @@ function T-Drivers {
             if ($infs -eq 0) { Write-Host '  En esa carpeta no hay drivers (archivos .inf).' -ForegroundColor Red; return }
             Write-Host ('  Se encontraron ' + $infs + ' drivers. Windows solo instala los que corresponden al hardware de este equipo.')
             if (Confirm-Action 'Instalar los drivers del respaldo?') {
-                Invoke-Live 'Instalar drivers (puede tardar varios minutos)' 'pnputil.exe' ('/add-driver "' + (Join-Path $src '*.inf') + '" /subdirs /install')
+                if ($global:IsWin10) { Invoke-Live 'Instalar drivers (puede tardar varios minutos)' 'pnputil.exe' ('/add-driver "' + (Join-Path $src '*.inf') + '" /subdirs /install') }
+                else {
+                    foreach ($inf in @(Get-ChildItem -LiteralPath $src -Recurse -Filter *.inf -ErrorAction SilentlyContinue)) {
+                        Invoke-Live ('Instalar ' + $inf.Name) 'pnputil.exe' ('-i -a "' + $inf.FullName + '"')
+                    }
+                }
                 Write-Host '  Reinicia el equipo al terminar.' -ForegroundColor Yellow
             }
         }
@@ -1955,7 +2171,7 @@ function T-BackupFiles {
     Write-Section 'Respaldar archivos del usuario'
     $skip = @('Public', 'Default', 'Default User', 'All Users', 'defaultuser0', 'Todos los usuarios', 'Acceso publico')
     $users = @(Get-ChildItem -LiteralPath "$env:SystemDrive\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {
-        $_.Name -notin $skip -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and (Test-Path -LiteralPath (Join-Path $_.FullName 'NTUSER.DAT'))
+        ($skip) -notcontains ($_.Name) -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and (Test-Path -LiteralPath (Join-Path $_.FullName 'NTUSER.DAT'))
     })
     if ($users.Count -eq 0) { Write-Host '  No se encontraron usuarios.' -ForegroundColor Red; return }
     for ($i = 0; $i -lt $users.Count; $i++) { Write-Host ('   {0}. {1}' -f ($i + 1), $users[$i].Name) }
@@ -1966,11 +2182,11 @@ function T-BackupFiles {
     $src = @()
     foreach ($f in @(@('Escritorio', 'Desktop'), @('Documentos', 'Documents'), @('Imagenes', 'Pictures'), @('Musica', 'Music'), @('Videos', 'Videos'), @('Descargas', 'Downloads'))) {
         $p = Join-Path $prof $f[1]
-        if (Test-Path -LiteralPath $p) { $src += [pscustomobject]@{ N = $f[0]; P = $p; Size = [double]0; Count = 0 } }
+        if (Test-Path -LiteralPath $p) { $src += (New-Object PSObject -Property @{ N = $f[0]; P = $p; Size = [double]0; Count = 0 }) }
     }
     foreach ($od in @(Get-ChildItem -LiteralPath $prof -Directory -Filter 'OneDrive*' -ErrorAction SilentlyContinue)) {
         foreach ($sub in @(Get-ChildItem -LiteralPath $od.FullName -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(Desktop|Escritorio|Documents|Documentos|Pictures|Im.genes)$' })) {
-            $src += [pscustomobject]@{ N = ($od.Name + ' - ' + $sub.Name); P = $sub.FullName; Size = [double]0; Count = 0 }
+            $src += (New-Object PSObject -Property @{ N = ($od.Name + ' - ' + $sub.Name); P = $sub.FullName; Size = [double]0; Count = 0 })
         }
     }
 
@@ -2059,23 +2275,23 @@ function Find-BigFiles([string]$root, [double]$minBytes = 250MB) {
     while ($stack.Count -gt 0) {
         $dir = $stack.Pop()
         try {
-            foreach ($f in $dir.EnumerateFiles()) {
+            foreach ($f in $dir.GetFiles()) {
                 $len = $f.Length
                 $seg = $f.FullName.Substring($rootLen).Split('\')
                 if ($seg.Count -gt 1) {
                     $lvl1[$seg[0]] = [double]$lvl1[$seg[0]] + $len
                     if ($seg.Count -gt 2) { $k2 = $seg[0] + '\' + $seg[1]; $lvl2[$k2] = [double]$lvl2[$k2] + $len }
                 }
-                if ($len -ge $minBytes) { [void]$big.Add([pscustomobject]@{ Ruta = $f.FullName; Bytes = $len; Fecha = $f.LastWriteTime }) }
+                if ($len -ge $minBytes) { [void]$big.Add((New-Object PSObject -Property @{ Ruta = $f.FullName; Bytes = $len; Fecha = $f.LastWriteTime })) }
             }
         } catch {}
         try {
-            foreach ($sd in $dir.EnumerateDirectories()) {
+            foreach ($sd in $dir.GetDirectories()) {
                 if (-not ($sd.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($sd) }
             }
         } catch {}
     }
-    return [pscustomobject]@{ Big = $big; L1 = $lvl1; L2 = $lvl2 }
+    return (New-Object PSObject -Property @{ Big = $big; L1 = $lvl1; L2 = $lvl2 })
 }
 
 function T-BigFiles {
@@ -2123,7 +2339,7 @@ function T-DiskSpeed {
     if ($global:DryRun) { Write-Host ('  [SIM] Medir velocidad de la unidad ' + $letter + ':') -ForegroundColor DarkYellow; return }
     Write-Host '  Midiendo... tarda 1-2 minutos. No uses el equipo mientras tanto.'
     $out = (& winsat.exe disk -drive $letter 2>&1 | Out-String)
-    $res = [ordered]@{}
+    $res = @{}
     foreach ($m in [regex]::Matches($out, 'Disk\s+(Random|Sequential)\s+[\d\.,]+\s+(Read|Write)\s+([\d\.,]+)\s+MB/s')) {
         $res[$m.Groups[1].Value + ' ' + $m.Groups[2].Value] = [double]::Parse($m.Groups[3].Value.Replace(',', '.'), [Globalization.CultureInfo]::InvariantCulture)
     }
@@ -2140,7 +2356,8 @@ function T-DiskSpeed {
         'Random Write'     = 'Escritura de archivos pequenos'
     }
     Write-Host ''
-    foreach ($k in $res.Keys) {
+    foreach ($k in @('Sequential Read', 'Sequential Write', 'Random Read', 'Random Write')) {
+        if (-not $res.ContainsKey($k)) { continue }
         $t = $label[$k]; if (-not $t) { $t = $k }
         Write-Host ('   {0,-52} {1,8:N0} MB/s' -f $t, $res[$k])
         Write-Log ('Velocidad ' + $letter + ': ' + $k + ' = ' + $res[$k] + ' MB/s')
@@ -2162,13 +2379,13 @@ function Get-WifiProfiles {
         New-Item -ItemType Directory -Path $tmp -Force | Out-Null
         $null = netsh wlan export profile key=clear folder=$tmp
         foreach ($x in @(Get-ChildItem -LiteralPath $tmp -Filter *.xml -ErrorAction SilentlyContinue)) {
-            [xml]$doc = Get-Content -LiteralPath $x.FullName -Raw
+            [xml]$doc = [IO.File]::ReadAllText($x.FullName)
             $p = $doc.WLANProfile
             $auth = [string]$p.MSM.security.authEncryption.authentication
             $key  = [string]$p.MSM.security.sharedKey.keyMaterial
             if ($auth -eq 'open') { $key = '(red abierta, sin contrasena)' }
             elseif (-not $key) { $key = '(red de empresa / no disponible)' }
-            $nets += [pscustomobject]@{ Red = [string]$p.name; Seguridad = $auth; Contrasena = $key }
+            $nets += (New-Object PSObject -Property @{ Red = [string]$p.name; Seguridad = $auth; Contrasena = $key })
         }
     } finally {
         # Los archivos exportados tienen contrasenas: se borran siempre, aunque algo falle
@@ -2190,10 +2407,10 @@ function T-Wifi {
     if ($nets.Count -eq 0) { Write-Host '  No hay redes WiFi guardadas.' }
     else {
         Write-Host '  NO compartas esta pantalla: muestra contrasenas.' -ForegroundColor Yellow
-        $nets | Sort-Object Red | Show-Table
+        $nets | Sort-Object Red | Select-Object Red, Seguridad, Contrasena | Show-Table
         Write-Log ('Redes WiFi guardadas: ' + $nets.Count + ' (las contrasenas NO se guardan en el log)')
     }
-    if (Confirm-Action 'Generar el reporte de problemas de WiFi de los ultimos 3 dias?') {
+    if ($global:IsWin8 -and (Confirm-Action 'Generar el reporte de problemas de WiFi de los ultimos 3 dias?')) {
         Step 'Generar reporte WiFi' { netsh wlan show wlanreport }
         $rep = "$env:ProgramData\Microsoft\Windows\WlanReport\wlan-report-latest.html"
         if (-not $global:DryRun -and (Test-Path -LiteralPath $rep)) { Start-Process $rep }
@@ -2211,11 +2428,11 @@ function T-Printer {
     Step 'Detener la cola de impresion' { Stop-Service -Name Spooler -Force -ErrorAction Stop }
     Clear-Folder 'Documentos atascados' @($spool)
     Step 'Iniciar la cola de impresion' { Start-Service -Name Spooler -ErrorAction Stop }
-    $pr = @(Get-Printer -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'PDF|XPS|OneNote|Fax' })
+    $pr = @(Get-CimInstance Win32_Printer -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'PDF|XPS|OneNote|Fax' })
     if ($pr.Count -gt 0) {
         Write-Host ''
         Write-Host '  Impresoras instaladas:' -ForegroundColor Cyan
-        foreach ($p in $pr) { Write-Host ('   - {0}   ({1})' -f $p.Name, $p.PrinterStatus) }
+        foreach ($p in $pr) { $st = 'lista'; if ($p.WorkOffline) { $st = 'SIN CONEXION' }; Write-Host ('   - {0}   ({1})' -f $p.Name, $st) }
     }
     Write-Host ''
     Write-Host '  Si sigue sin imprimir: apaga y enciende la impresora, revisa el cable o el WiFi,' -ForegroundColor DarkGray
@@ -2249,7 +2466,8 @@ function T-WUReset {
             if ($o.CreationTime -lt $lim) { Remove-Item -LiteralPath $o.FullName -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
-    Step 'Pedir a Windows que busque actualizaciones' { Start-Process -FilePath "$env:SystemRoot\System32\UsoClient.exe" -ArgumentList 'StartScan' -WindowStyle Hidden -ErrorAction Stop }
+    if ($global:IsWin10) { Step 'Pedir a Windows que busque actualizaciones' { Start-Process -FilePath "$env:SystemRoot\System32\UsoClient.exe" -ArgumentList 'StartScan' -WindowStyle Hidden -ErrorAction Stop } }
+    else { Step 'Pedir a Windows que busque actualizaciones' { Start-Process -FilePath "$env:SystemRoot\System32\wuauclt.exe" -ArgumentList '/detectnow' -WindowStyle Hidden -ErrorAction Stop } }
     Write-Host '  Listo. Abre Configuracion > Windows Update y pulsa "Buscar actualizaciones".' -ForegroundColor Green
     Write-Host '  (El historial de actualizaciones puede aparecer vacio: es normal, las actualizaciones siguen instaladas.)' -ForegroundColor DarkGray
 }
@@ -2270,6 +2488,10 @@ function Invoke-Maintenance {
     if ($mp -and $mp.AntivirusEnabled) {
         try { Update-MpSignature -ErrorAction Stop } catch {}
         try { Start-MpScan -ScanType QuickScan -ErrorAction Stop; Write-Log '[OK] Analisis rapido de virus' } catch { Write-Log ('[AVISO] Analisis de virus: ' + $_.Exception.Message) }
+    } elseif (Get-MpCmdRun) {
+        $null = & (Get-MpCmdRun) -SignatureUpdate 2>&1
+        $null = & (Get-MpCmdRun) -Scan -ScanType 1 2>&1
+        Write-Log ('[OK] Analisis rapido de virus (codigo ' + $LASTEXITCODE + ', 2 = amenazas encontradas)')
     }
     foreach ($old in @(Get-ChildItem -LiteralPath $global:LogDir -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-90) })) {
         Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
@@ -2277,18 +2499,46 @@ function Invoke-Maintenance {
     Write-Log ('##### FIN MANTENIMIENTO: liberado ' + (Format-Size $global:Freed) + ' #####')
 }
 
+function Test-MaintTask { $null = schtasks.exe /Query /TN $global:TaskName 2>&1; return ($LASTEXITCODE -eq 0) }
+
+function New-MaintTaskXml([string]$day, [int]$hour, [string]$bat, [string]$userId = 'S-1-5-18', [string]$runLevel = 'HighestAvailable') {
+    $start = [datetime]::Today.AddHours($hour).ToString("yyyy-MM-dd'T'HH:mm:ss")
+    return @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Limpieza segura y analisis de virus semanal. Creado por MG Toolkit (Matthew Garay).</Description></RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>$start</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek><DaysOfWeek><$day /></DaysOfWeek><WeeksInterval>1</WeeksInterval></ScheduleByWeek>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals><Principal id="Author"><UserId>$userId</UserId><RunLevel>$runLevel</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>cmd.exe</Command><Arguments>/c $bat --mantenimiento</Arguments></Exec></Actions>
+</Task>
+"@
+}
+
 function T-Schedule {
     Write-Section 'Mantenimiento automatico semanal'
     Write-Host '  Que hace cada semana, sin molestar al usuario:' -ForegroundColor Gray
     Write-Host '   - Borra temporales con mas de 1 dia, volcados de memoria y cache DNS' -ForegroundColor Gray
-    Write-Host '   - Analisis rapido de virus con Defender (si esta activo)' -ForegroundColor Gray
+    Write-Host '   - Analisis rapido de virus con el antivirus de Microsoft (si esta activo)' -ForegroundColor Gray
     Write-Host '  NO cierra programas, NO reinicia y NO cambia ninguna configuracion.' -ForegroundColor Gray
-    $task = Get-ScheduledTask -TaskName $global:TaskName -ErrorAction SilentlyContinue
+    $exists = Test-MaintTask
     Write-Host ''
-    if ($task) {
-        $info = Get-ScheduledTaskInfo -TaskName $global:TaskName -ErrorAction SilentlyContinue
-        Write-Host ('  Estado: ACTIVADO.  Proxima vez: ' + $info.NextRunTime) -ForegroundColor Green
-        if ($info.LastRunTime -and $info.LastRunTime.Year -gt 2000) { Write-Host ('  Ultima vez: ' + $info.LastRunTime + '  (resultado ' + $info.LastTaskResult + ', 0 = correcto)') -ForegroundColor Gray }
+    if ($exists) {
+        Write-Host '  Estado: ACTIVADO.' -ForegroundColor Green
+        schtasks.exe /Query /TN $global:TaskName /FO LIST | Out-String | Write-Host
     } else { Write-Host '  Estado: DESACTIVADO.' -ForegroundColor Yellow }
     Write-Host ''
     Write-Host '   1. Activar / cambiar dia y hora'
@@ -2299,6 +2549,7 @@ function T-Schedule {
     switch ((Read-Host '  Opcion').Trim()) {
         '1' {
             $days = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+            $dias = @('lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado', 'domingo')
             $dn = 0; $d = Read-Host '  Dia (1=lunes 2=martes 3=miercoles 4=jueves 5=viernes 6=sabado 7=domingo, ENTER = 3)'
             if (-not [int]::TryParse($d, [ref]$dn) -or $dn -lt 1 -or $dn -gt 7) { $dn = 3 }
             $hn = 0; $h = Read-Host '  Hora (0 a 23, ENTER = 12)'
@@ -2308,22 +2559,21 @@ function T-Schedule {
                 New-Item -ItemType Directory -Path $global:InstallDir -Force | Out-Null
                 Copy-Item -LiteralPath $env:OPT_SELF -Destination $bat -Force -ErrorAction Stop
             }
-            Step ('Programar el mantenimiento: ' + $days[$dn - 1] + ' a las ' + $hn + ':00') {
-                $act = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/c ' + $bat + ' --mantenimiento')
-                $trg = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $days[$dn - 1] -At ([datetime]::Today.AddHours($hn))
-                $set = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-                $pri = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-                Register-ScheduledTask -TaskName $global:TaskName -Action $act -Trigger $trg -Settings $set -Principal $pri -Description 'Limpieza segura y analisis de virus semanal. Creado por MG Toolkit (Matthew Garay).' -Force -ErrorAction Stop | Out-Null
+            $xmlFile = Join-Path $env:TEMP 'MGToolkit_tarea.xml'
+            Step ('Programar el mantenimiento: ' + $dias[$dn - 1] + ' a las ' + $hn + ':00') {
+                [IO.File]::WriteAllText($xmlFile, (New-MaintTaskXml $days[$dn - 1] $hn $bat), [Text.Encoding]::Unicode)
+                schtasks.exe /Create /TN $global:TaskName /XML $xmlFile /F
             }
+            Remove-Item -LiteralPath $xmlFile -Force -ErrorAction SilentlyContinue
             Write-Host '  Si el equipo esta apagado a esa hora, se hace la proxima vez que se encienda.' -ForegroundColor DarkGray
         }
         '2' {
-            if (-not $task) { Write-Host '  No estaba activado.'; return }
-            Step 'Borrar la tarea de mantenimiento' { Unregister-ScheduledTask -TaskName $global:TaskName -Confirm:$false -ErrorAction Stop }
+            if (-not $exists) { Write-Host '  No estaba activado.'; return }
+            Step 'Borrar la tarea de mantenimiento' { schtasks.exe /Delete /TN $global:TaskName /F }
         }
         '3' {
-            if (-not $task) { Write-Host '  Primero activalo con la opcion 1.' -ForegroundColor Yellow; return }
-            Step 'Iniciar el mantenimiento ahora (corre en segundo plano)' { Start-ScheduledTask -TaskName $global:TaskName -ErrorAction Stop }
+            if (-not $exists) { Write-Host '  Primero activalo con la opcion 1.' -ForegroundColor Yellow; return }
+            Step 'Iniciar el mantenimiento ahora (corre en segundo plano)' { schtasks.exe /Run /TN $global:TaskName }
             Write-Host ('  Revisa el resultado en unos minutos en: ' + (Join-Path $global:InstallDir 'Logs')) -ForegroundColor Gray
         }
         '4' {
@@ -2332,8 +2582,6 @@ function T-Schedule {
         }
     }
 }
-
-
 function Invoke-Task([string]$name, [scriptblock]$body, [switch]$Simple) {
     $global:Freed = [int64]0; $global:Errors = 0; $global:Warnings = 0; $global:YesAll = $false
     Clear-Host
@@ -2348,10 +2596,10 @@ function Invoke-Task([string]$name, [scriptblock]$body, [switch]$Simple) {
         return
     }
     $drive = $env:SystemDrive.TrimEnd(':')
-    $free0 = (Get-PSDrive -Name $drive).Free
+    $free0 = Get-FreeBytes
     $t0 = Get-Date
     & $body
-    $free1 = (Get-PSDrive -Name $drive).Free
+    $free1 = Get-FreeBytes
     $dur = (Get-Date) - $t0
     Write-Host ''
     Write-Host '  ------------------------- RESUMEN -------------------------' -ForegroundColor Cyan
@@ -2372,7 +2620,7 @@ function Invoke-Task([string]$name, [scriptblock]$body, [switch]$Simple) {
 function Show-Header {
     Clear-Host
     $ram = Get-RamStatus
-    $c = Get-PSDrive -Name ($env:SystemDrive.TrimEnd(':'))
+    $c = New-Object PSObject -Property @{ Free = (Get-FreeBytes) }
     Write-Host '  ==================================================================' -NoNewline -ForegroundColor Cyan
     Write-Host '  Matthew Garay' -ForegroundColor White
     Write-Host '        MG Toolkit  -  Herramientas de Limpieza y Optimizacion de Windows' -ForegroundColor Cyan
@@ -2506,8 +2754,8 @@ try {
     $raw.WindowSize = $win
 } catch {}
 
-function New-MI([string]$n, [string]$t) { [pscustomobject]@{ K = 'I'; N = $n; T = $t } }
-function New-MH([string]$t) { [pscustomobject]@{ K = 'H'; T = $t } }
+function New-MI([string]$n, [string]$t) { (New-Object PSObject -Property @{ K = 'I'; N = $n; T = $t }) }
+function New-MH([string]$t) { (New-Object PSObject -Property @{ K = 'H'; T = $t }) }
 
 function Write-Cell($c, [int]$w) {
     if ($null -eq $c) { Write-Host (''.PadRight($w)) -NoNewline; return }
@@ -2524,7 +2772,12 @@ function Open-Manual {
     $man = Join-Path $dir 'MANUAL.md'
     if (Test-Path -LiteralPath $man) {
         # Si no hay programa asociado a .md, se abre con el Bloc de notas
-        try { Start-Process -FilePath $man -ErrorAction Stop } catch { Start-Process notepad.exe -ArgumentList ('"' + $man + '"') }
+        try { Start-Process -FilePath $man -ErrorAction Stop }
+        catch {
+            $txt = Join-Path $env:TEMP 'Manual MG Toolkit.txt'
+            [IO.File]::WriteAllText($txt, ([IO.File]::ReadAllText($man) -replace "`r?`n", "`r`n"), (New-Object Text.UTF8Encoding($true)))
+            Start-Process notepad.exe -ArgumentList ('"' + $txt + '"')
+        }
     }
     else { Write-Host ('   No se encontro "MANUAL.md" junto a este programa (' + $dir + ').') -ForegroundColor Yellow; Start-Sleep -Seconds 3 }
 }

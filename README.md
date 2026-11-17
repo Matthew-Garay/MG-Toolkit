@@ -2,7 +2,7 @@
 
 **Herramientas de Limpieza y Optimización de Windows** · Creado por **Matthew Garay**
 
-MG Toolkit es una herramienta de consola para Windows 10 y 11 que reúne en un solo archivo `.bat` el mantenimiento que hace un técnico de soporte: limpiar, acelerar, reparar Windows, buscar virus, respaldar, instalar programas y revisar el equipo. Al terminar genera un **informe con una puntuación de 0 a 100** que dice qué le falta a Windows para estar al 100% y cómo arreglarlo.
+MG Toolkit es una herramienta de consola para **Windows 7, 8, 8.1, 10 y 11** que reúne en un solo archivo `.bat` el mantenimiento que hace un técnico de soporte: limpiar, acelerar, reparar Windows, buscar virus, respaldar, instalar programas y revisar el equipo. Al terminar genera un **informe con una puntuación de 0 a 100** que dice qué le falta a Windows para estar al 100% y cómo arreglarlo.
 
 Usa solo herramientas que ya trae Windows (DISM, SFC, CHKDSK, Microsoft Defender, robocopy, pnputil, winget). No instala nada por su cuenta ni toca archivos internos de Windows.
 
@@ -69,9 +69,11 @@ Al terminar las opciones 1, 2 o 3 se abre un informe HTML (guardado en `Escritor
 
 ## Requisitos
 
-- Windows 10 u 11.
+- Windows 7 SP1, 8, 8.1, 10 u 11 (32 o 64 bits).
 - Cuenta de administrador.
 - Internet solo para actualizaciones, instalar programas y actualizar el antivirus.
+
+En Windows 7 y 8 el programa se adapta solo: las funciones que esas versiones no tienen se avisan en pantalla, en vez de fallar. El detalle está en el [manual](MANUAL.md#6-windows-7-y-8). Se probó con PowerShell 2.0, el motor que trae Windows 7.
 
 ## Documentación
 
