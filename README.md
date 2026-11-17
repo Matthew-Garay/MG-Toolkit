@@ -77,6 +77,10 @@ Al terminar las opciones 1, 2 o 3 se abre un informe HTML (guardado en `Escritor
 
 El manual completo, con todas las opciones, qué usar en cada caso y cómo deshacer cambios, está en **[MANUAL.md](MANUAL.md)**.
 
+## Licencia
+
+Distribuido bajo la licencia **MIT**: puedes usarlo, copiarlo, modificarlo y compartirlo libremente, incluso con fines comerciales, siempre que mantengas el aviso de copyright. Se entrega "tal cual", sin garantía. Ver [LICENSE](LICENSE).
+
 ## Autor
 
 Creado por **Matthew Garay**.
