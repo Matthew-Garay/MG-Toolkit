@@ -39,13 +39,13 @@ Para ver lo que haría sin cambiar nada, activa el **modo simulación** (opción
 | Área | Herramientas |
 |---|---|
 | **Hacer todo** | Todo preguntando paso a paso (S / N / T = sí a todo) · Todo automático · Solo diagnóstico con informe |
-| **Limpieza** | Temporales y basura · Caché de navegadores · Papelera · Hibernación · Buscar archivos grandes · Quitar apps basura de fábrica |
-| **Velocidad** | Máximo rendimiento · Liberar RAM · Programas de inicio · Qué consume más · Servicios sin uso · Telemetría y anuncios · Medir velocidad del disco · Deshacer cambios |
-| **Actualizar** | Actualizaciones de Windows · Actualizar drivers · Actualizar todos los programas · Instalar programas básicos (Chrome, 7-Zip, VLC, AnyDesk…) |
+| **Limpieza** | Temporales y basura · Caché de navegadores · Papelera · Hibernación · Buscar archivos grandes · Quitar apps basura de fábrica · Ver qué ocupa el disco · Buscar archivos duplicados |
+| **Velocidad** | Máximo rendimiento · Liberar RAM · Programas de inicio · Qué consume más · Servicios sin uso · Telemetría y anuncios · Medir velocidad del disco · Inicio rápido · Deshacer cambios |
+| **Actualizar** | Actualizaciones de Windows · Actualizar drivers · Actualizar todos los programas · Instalar programas básicos (Chrome, 7-Zip, VLC, AnyDesk…) · Compatibilidad con Windows 11 |
 | **Red e internet** | Probar internet (router, DNS, velocidad) · Cambiar DNS · Programas conectados a internet · Archivo hosts · Quitar proxy de publicidad · Sincronizar la hora |
-| **Seguridad y respaldo** | Buscar virus con Defender (rápido, completo y sin conexión) · Punto de restauración · Respaldar archivos a USB · Respaldar y restaurar drivers |
-| **Reparación** | DISM + SFC · CHKDSK · Optimizar disco · Reparar internet · Reparar Windows Update · Destrabar impresora · Reiniciar servicios · Firewall · Probar RAM |
-| **Información** | Datos del equipo y salud del disco · Batería · Activación · Contraseñas y reporte de WiFi · Clave de producto · Lista de programas instalados |
+| **Seguridad y respaldo** | Buscar virus con Defender (rápido, completo y sin conexión) · Punto de restauración · Respaldar archivos a USB · Respaldar y restaurar drivers · Cuentas de usuario |
+| **Reparación** | DISM + SFC · CHKDSK · Optimizar disco · Reparar internet · Reparar Windows Update · Destrabar impresora · Reiniciar servicios · Firewall · Probar RAM · Dispositivos sin driver · Reparar búsqueda · Reparar iconos · Problemas de suspensión |
+| **Información** | Datos del equipo y salud del disco · Batería · Activación de Windows y Office · Contraseñas y reporte de WiFi · Clave de producto · Lista de programas instalados · Historial de fallos y pantallas azules |
 | **Sistema** | Mantenimiento semanal programado · Reiniciar en modo seguro o a la BIOS · Atajos a 22 herramientas de Windows |
 
 ## El informe

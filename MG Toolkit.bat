@@ -279,7 +279,7 @@ function Invoke-Live([string]$desc, [string]$exe, [string]$arguments) {
 
 # Borra el contenido de carpetas (acepta comodines) y cuenta el espacio liberado
 # $olderDays > 0: solo borra archivos sin modificar en esos dias (no toca lo que un programa esta usando ahora)
-function Clear-Folder([string]$desc, [string[]]$paths, [string]$filter = '*', [int]$olderDays = 0) {
+function Clear-Folder([string]$desc, [string[]]$paths, [string]$filter = '*', [int]$olderDays = 0, [switch]$NoRecurse) {
     $roots = @()
     foreach ($p in $paths) {
         foreach ($r in @(Resolve-Path -Path $p -ErrorAction SilentlyContinue)) { $roots += $r.ProviderPath }
@@ -287,7 +287,7 @@ function Clear-Folder([string]$desc, [string[]]$paths, [string]$filter = '*', [i
     $roots = @($roots | Select-Object -Unique)
     $files = @()
     foreach ($r in $roots) {
-        $files += @(Get-ChildItem -LiteralPath $r -Filter $filter -Recurse -Force -File -ErrorAction SilentlyContinue)
+        $files += @(Get-ChildItem -LiteralPath $r -Filter $filter -Recurse:(-not $NoRecurse) -Force -File -ErrorAction SilentlyContinue)
     }
     if ($olderDays -gt 0) {
         $lim = (Get-Date).AddDays(-$olderDays)
@@ -1419,6 +1419,10 @@ function Get-Diagnostics {
     if (Get-SafeBootState) { Add-Check 'Windows' 'Modo seguro' 'ATENCION' 'El equipo arranca siempre en modo seguro' 'Volver al inicio normal con la opcion 52 > 3.' }
     $lua = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
     if ($lua -eq 0) { Add-Check 'Seguridad' 'Control de cuentas (UAC)' 'CRITICO' 'Desactivado' 'Activar UAC: protege contra programas maliciosos.' }
+    $gst = @(Get-WmiObject Win32_UserAccount -Filter 'LocalAccount=True AND Disabled=False' -ErrorAction SilentlyContinue | Where-Object { ([string]$_.SID).EndsWith('-501') })
+    if ($gst.Count -gt 0) { Add-Check 'Seguridad' 'Cuenta de invitado' 'ATENCION' 'Activa: cualquiera puede entrar sin contrasena' 'Desactivarla con la opcion 64.' }
+    $upD = ((Get-Date) - $os.LastBootUpTime).Days
+    if ($upD -ge 14) { Add-Check 'Windows' 'Sin reiniciar' 'ATENCION' ('El equipo lleva ' + $upD + ' dias sin reiniciarse') 'Reiniciar (no solo apagar) para terminar actualizaciones y limpiar fallos. Ver la opcion 62 (inicio rapido).' }
 
     # ------------------------- HARDWARE -------------------------
     $ramGB = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
@@ -3037,6 +3041,595 @@ function T-WinTools {
     }
 }
 
+# =====================================================================
+#   HERRAMIENTAS EXTRA (opciones 54 a 64)
+# =====================================================================
+
+# ---------- 54: compatibilidad con Windows 11 ----------
+# Devuelve 'SI', 'NO' o '?' segun la generacion del procesador (aproximado a la lista oficial)
+function Get-CpuWin11([string]$name) {
+    if ($name -match 'Core\(TM\) Ultra|Core Ultra|Snapdragon|Ryzen.*\bAI\b|Ryzen Z\d') { return 'SI' }
+    if ($name -match 'i[3579]-(\d{4,5})') {
+        $m = $matches[1]
+        if ($m.Length -eq 5) { $gen = [int]$m.Substring(0, 2) }
+        elseif ($m.StartsWith('1')) { $gen = 10 }              # portatiles 10a a 14a gen: i5-1135G7, i7-1255U...
+        else { $gen = [int]$m.Substring(0, 1) }
+        if ($gen -ge 8) { return 'SI' }
+        return 'NO'
+    }
+    if ($name -match 'i[3579]\s*[-\s]\d{3}\b|Core\(TM\)2|Core 2 |Pentium\(R\) (4|D)|Athlon(\(tm\))? (64|II)|Phenom|\bA(4|6|8|9|10|12)-\d|\bFX-\d|\bE[12]-\d') { return 'NO' }
+    if ($name -match 'Ryzen\s+\d\s+(PRO\s+)?(\d)\d{3}') { if ([int]$matches[2] -ge 2) { return 'SI' }; return 'NO' }
+    return '?'
+}
+
+function New-Req([string]$req, [string]$ok, [string]$det, [string]$fix) {
+    New-Object PSObject -Property @{ Requisito = $req; Cumple = $ok; Detalle = $det; Solucion = $fix }
+}
+
+function Get-Win11Compat {
+    $cs  = Get-CimInstance Win32_ComputerSystem
+    $cpu = @(Get-CimInstance Win32_Processor)[0]
+    $rows = @()
+
+    $c = Get-CpuWin11 ([string]$cpu.Name)
+    $fix = ''
+    if ($c -eq 'NO') { $fix = 'Procesador demasiado antiguo para Windows 11. No se arregla con programas: solo cambiando el equipo (o la placa y el procesador).' }
+    if ($c -eq '?')  { $fix = 'No se pudo confirmar: revisarlo con la app "Comprobacion de estado del PC" (PC Health Check) de Microsoft.' }
+    $rows += New-Req 'Procesador' $c (([string]$cpu.Name).Trim()) $fix
+
+    $cpu64 = ([int]$cpu.DataWidth -eq 64 -or [int]$cpu.AddressWidth -eq 64 -or $global:Is64)
+    $det = 'Procesador de 64 bits: ' + (Get-SiNo $cpu64) + ' | Windows de 64 bits: ' + (Get-SiNo $global:Is64)
+    $ok = 'SI'; $fix = ''
+    if (-not $cpu64) { $ok = 'NO'; $fix = 'El procesador es de 32 bits: no puede usar Windows 11.' }
+    elseif (-not $global:Is64) { $ok = 'NO'; $fix = 'Windows instalado es de 32 bits: hay que instalar Windows 11 desde cero (respaldar antes con la opcion 23).' }
+    $rows += New-Req '64 bits' $ok $det $fix
+
+    $okC = ([int]$cpu.NumberOfCores -ge 2 -and [int]$cpu.MaxClockSpeed -ge 1000)
+    $ok = 'NO'; if ($okC) { $ok = 'SI' }
+    $rows += New-Req 'Nucleos y velocidad' $ok ([string]$cpu.NumberOfCores + ' nucleos a ' + [math]::Round([int]$cpu.MaxClockSpeed / 1000, 1) + ' GHz (minimo 2 a 1 GHz)') ''
+
+    $gb = [math]::Round([double]$cs.TotalPhysicalMemory / 1GB, 1)
+    $ok = 'NO'; $fix = 'Agregar memoria RAM hasta tener al menos 4 GB (recomendado 8 GB).'
+    if ($gb -ge 3.5) { $ok = 'SI'; $fix = '' }
+    $rows += New-Req 'Memoria RAM' $ok ([string]$gb + ' GB (minimo 4 GB)') $fix
+
+    $disk = @(Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='" + $env:SystemDrive + "'"))
+    $dgb = 0; if ($disk.Count -gt 0) { $dgb = [math]::Round([double]$disk[0].Size / 1GB) }
+    $ok = 'NO'; $fix = 'La unidad ' + $env:SystemDrive + ' debe tener al menos 64 GB: cambiar a un disco (SSD) mas grande.'
+    if ($dgb -ge 55) { $ok = 'SI'; $fix = '' }
+    $rows += New-Req 'Disco' $ok ('Unidad ' + $env:SystemDrive + ' de ' + $dgb + ' GB (minimo 64 GB)') $fix
+
+    # Windows 8+: variable firmware_type de cmd (UEFI / Legacy). Windows 7: el cargador de arranque es winload.efi en UEFI
+    $fw = ([string](cmd.exe /c 'echo %firmware_type%')).Trim()
+    if ($fw -eq 'UEFI') { $uefi = $true }
+    elseif ($fw -eq 'Legacy') { $uefi = $false }
+    else { $uefi = ((bcdedit /enum '{current}' 2>$null | Out-String) -match 'winload\.efi') }
+    $ok = 'NO'; $fix = 'El equipo arranca en modo BIOS antiguo (Legacy/CSM). Se puede pasar a UEFI convirtiendo el disco a GPT con "mbr2gpt" y cambiando la BIOS a UEFI. Hacerlo con respaldo y con cuidado: si se hace mal, Windows no arranca.'
+    if ($uefi) { $ok = 'SI'; $fix = '' }
+    $rows += New-Req 'Arranque UEFI' $ok ((@('Legacy (BIOS antigua)', 'UEFI'))[[int]$uefi]) $fix
+
+    $sb = $false
+    try { $sb = ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State' -ErrorAction Stop).UEFISecureBootEnabled -eq 1) } catch {}
+    $ok = 'NO'; $fix = 'Activar "Secure Boot" (Arranque seguro) en la BIOS, en la pestana Boot o Security.'
+    if (-not $uefi) { $fix = 'Necesita primero arranque UEFI (ver arriba).' }
+    if ($sb) { $ok = 'SI'; $fix = '' }
+    $rows += New-Req 'Arranque seguro' $ok ((@('Desactivado', 'Activado'))[[int]$sb]) $fix
+
+    $tpmVer = ''
+    try {
+        $tpm = @(Get-CimInstance -Namespace 'root\cimv2\security\microsofttpm' -ClassName Win32_Tpm -ErrorAction Stop)
+        if ($tpm.Count -gt 0) { $tpmVer = ([string]$tpm[0].SpecVersion).Split(',')[0].Trim() }
+    } catch {}
+    $ok = 'NO'; $fix = 'No se detecto TPM: casi todos los equipos desde 2016 lo tienen desactivado de fabrica. Activarlo en la BIOS: "Intel PTT", "AMD fTPM" o "Security Device".'
+    $det = 'No detectado o desactivado'
+    if ($tpmVer) {
+        $det = 'Version ' + $tpmVer
+        if ($tpmVer.StartsWith('2')) { $ok = 'SI'; $fix = '' }
+        else { $fix = 'TPM ' + $tpmVer + ' no sirve: hace falta 2.0. Algunos equipos permiten cambiarlo en la BIOS o con una actualizacion del fabricante.' }
+    }
+    $rows += New-Req 'Chip de seguridad TPM' $ok $det $fix
+    return $rows
+}
+
+function T-Win11Check {
+    Write-Section 'Compatibilidad con Windows 11'
+    if ($global:WinBuild -ge 22000) { Write-Host '  Este equipo ya tiene Windows 11. Igual se muestran los requisitos:' -ForegroundColor Green }
+    Write-Host '  Revisando el equipo...' -ForegroundColor DarkGray
+    $rows = @(Get-Win11Compat)
+    Write-Host ''
+    foreach ($r in $rows) {
+        $col = 'Green'; if ($r.Cumple -eq 'NO') { $col = 'Red' } elseif ($r.Cumple -eq '?') { $col = 'Yellow' }
+        Write-Host ('  ' + $r.Requisito.PadRight(24)) -NoNewline
+        Write-Host ($r.Cumple.PadRight(5)) -NoNewline -ForegroundColor $col
+        Write-Host $r.Detalle -ForegroundColor Gray
+    }
+    $bad = @($rows | Where-Object { $_.Cumple -ne 'SI' })
+    Write-Host ''
+    if ($bad.Count -eq 0) {
+        Write-Host '  RESULTADO: CUMPLE todos los requisitos de Windows 11.' -ForegroundColor Green
+        if ($global:WinBuild -lt 22000) { Write-Host '  Se puede actualizar gratis desde Windows Update o con el "Asistente de instalacion de Windows 11" de Microsoft.' }
+    } else {
+        $hard = @($bad | Where-Object { @('Procesador', '64 bits', 'Nucleos y velocidad') -contains $_.Requisito -and $_.Cumple -eq 'NO' })
+        if ($hard.Count -gt 0) { Write-Host '  RESULTADO: NO es compatible oficialmente con Windows 11.' -ForegroundColor Red }
+        else { Write-Host '  RESULTADO: le falta poco. Revisa lo que hay que hacer:' -ForegroundColor Yellow }
+        Write-Host ''
+        foreach ($r in $bad) { if ($r.Solucion) { Write-Host ('  - ' + $r.Requisito + ': ' + $r.Solucion) } }
+    }
+    Write-Log ('Compatibilidad con Windows 11: ' + (($rows | ForEach-Object { $_.Requisito + '=' + $_.Cumple }) -join ', '))
+}
+
+# ---------- 55: historial de fallos ----------
+$global:StopCodes = @{
+    '0x0000000a' = 'Driver defectuoso (IRQL_NOT_LESS_OR_EQUAL)'
+    '0x000000d1' = 'Driver defectuoso, casi siempre de red, WiFi o antivirus'
+    '0x0000001e' = 'Driver defectuoso (KMODE_EXCEPTION)'
+    '0x0000003b' = 'Driver de video o archivo de Windows danado'
+    '0x0000007e' = 'Driver o archivo de Windows danado'
+    '0x0000001a' = 'Memoria RAM con fallas: probar la RAM (opcion 33)'
+    '0x00000050' = 'Memoria RAM o driver: probar la RAM (opcion 33)'
+    '0x00000019' = 'Driver o memoria RAM (BAD_POOL_HEADER)'
+    '0x000000c2' = 'Driver defectuoso (BAD_POOL_CALLER)'
+    '0x0000007a' = 'Error leyendo el disco: revisar el disco (opcion 26) y su cable'
+    '0x00000024' = 'Error del sistema de archivos: revisar el disco (opcion 26)'
+    '0x000000ef' = 'Se cerro un proceso critico de Windows: reparar Windows (opcion 25) y revisar el disco'
+    '0x0000009f' = 'Driver que falla al suspender o apagar: actualizar drivers (opcion 49)'
+    '0x00000116' = 'Driver de video: actualizarlo o reinstalarlo desde la web del fabricante'
+    '0x00000124' = 'Falla de hardware: temperatura alta, fuente de poder, procesador u overclock'
+    '0x00000133' = 'Driver de disco o SSD lento: actualizar chipset y firmware del SSD'
+    '0x00000139' = 'Driver o archivo de Windows danado'
+    '0x0000013a' = 'Driver defectuoso (KERNEL_MODE_HEAP_CORRUPTION)'
+    '0x00000154' = 'Problema del disco o de memoria (UNEXPECTED_STORE_EXCEPTION)'
+}
+
+function T-CrashHistory {
+    Write-Section 'Historial de fallos (ultimos 30 dias)'
+    $since = (Get-Date).AddDays(-30)
+    $os = Get-CimInstance Win32_OperatingSystem
+    $up = (Get-Date) - $os.LastBootUpTime
+    Write-Host ('  Encendido sin reiniciar desde hace: ' + $up.Days + ' dias y ' + $up.Hours + ' horas') -ForegroundColor Gray
+
+    $bsod = @(Get-Ev @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WER-SystemErrorReporting'; Id = 1001; StartTime = $since })
+    Write-Host ''
+    if ($bsod.Count -eq 0) { Write-Host '  Pantallas azules: ninguna' -ForegroundColor Green }
+    else {
+        Write-Host ('  Pantallas azules: ' + $bsod.Count) -ForegroundColor Red
+        foreach ($e in ($bsod | Select-Object -First 8)) {
+            $code = ''; $why = 'Ver el codigo en internet'
+            if ([string]$e.Properties[0].Value -match '0x([0-9a-fA-F]+)') {
+                $code = '0x{0:x8}' -f [Convert]::ToInt64($matches[1], 16)
+                if ($global:StopCodes.ContainsKey($code)) { $why = $global:StopCodes[$code] }
+            }
+            Write-Host ('    ' + $e.TimeCreated.ToString('dd/MM/yyyy HH:mm') + '  ' + $code + '  ' + $why)
+            Write-Log ('Pantalla azul ' + $e.TimeCreated.ToString('dd/MM/yyyy HH:mm') + ' ' + $code)
+        }
+    }
+
+    $pw = @(Get-Ev @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 41; StartTime = $since })
+    if ($pw.Count -eq 0) { Write-Host '  Apagados inesperados: ninguno' -ForegroundColor Green }
+    else {
+        Write-Host ('  Apagados inesperados: ' + $pw.Count + '   (corte de luz, apagado con el boton, o se colgo / reinicio solo)') -ForegroundColor Yellow
+        Write-Host ('    Ultimos: ' + (($pw | Select-Object -First 5 | ForEach-Object { $_.TimeCreated.ToString('dd/MM HH:mm') }) -join ', '))
+        if ($pw.Count -ge 3 -and $bsod.Count -eq 0) { Write-Host '    Si se apaga solo sin pantalla azul: revisar temperatura (polvo, ventiladores), fuente de poder o bateria.' -ForegroundColor DarkGray }
+    }
+
+    $disk = @(Get-Ev @{ LogName = 'System'; ProviderName = 'disk'; Id = @(7, 11, 51, 153); StartTime = $since })
+    if ($disk.Count -eq 0) { Write-Host '  Errores del disco: ninguno' -ForegroundColor Green }
+    else { Write-Host ('  Errores del disco: ' + $disk.Count + '   -> respaldar los archivos (opcion 23) y revisar el disco (opcion 26)') -ForegroundColor Red }
+
+    $whea = @(Get-Ev @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WHEA-Logger'; Level = @(1, 2); StartTime = $since })
+    if ($whea.Count -gt 0) { Write-Host ('  Errores de hardware (WHEA): ' + $whea.Count + '   -> temperatura, fuente, RAM o procesador') -ForegroundColor Red }
+
+    $app = @(Get-Ev @{ LogName = 'Application'; ProviderName = 'Application Error'; Id = 1000; StartTime = $since })
+    $hang = @(Get-Ev @{ LogName = 'Application'; ProviderName = 'Application Hang'; Id = 1002; StartTime = $since })
+    Write-Host ''
+    if ($app.Count + $hang.Count -eq 0) { Write-Host '  Programas que se cerraron o colgaron: ninguno' -ForegroundColor Green }
+    else {
+        Write-Host '  Programas que mas se cerraron solos o se colgaron:' -ForegroundColor Yellow
+        $names = @($app | ForEach-Object { [string]$_.Properties[0].Value }) + @($hang | ForEach-Object { [string]$_.Properties[0].Value })
+        foreach ($g in ($names | Where-Object { $_ } | Group-Object | Sort-Object Count -Descending | Select-Object -First 8)) {
+            Write-Host ('    ' + ([string]$g.Count).PadLeft(4) + ' veces  ' + $g.Name)
+        }
+        Write-Host '    Solucion habitual: actualizar o reinstalar ese programa.' -ForegroundColor DarkGray
+    }
+
+    $dumps = @(Get-ChildItem -LiteralPath "$env:SystemRoot\Minidump" -Filter '*.dmp' -File -ErrorAction SilentlyContinue)
+    if ($dumps.Count -gt 0) { Write-Host ('  Archivos de volcado (Minidump): ' + $dumps.Count + ', el mas reciente del ' + ($dumps | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime.ToString('dd/MM/yyyy')) -ForegroundColor DarkGray }
+    Write-Log ('Historial: ' + $bsod.Count + ' pantallas azules, ' + $pw.Count + ' apagados inesperados, ' + $disk.Count + ' errores de disco, ' + $app.Count + ' cierres de programas')
+    Write-Host ''
+    if (Confirm-Action 'Abrir el Historial de confiabilidad de Windows (grafico por dia)?') { Start-Process perfmon.exe -ArgumentList '/rel' }
+}
+
+# ---------- 56: dispositivos con problemas ----------
+$global:PnpCodes = @{
+    1 = 'Mal configurado'; 3 = 'Driver danado o sin memoria'; 10 = 'No puede iniciar'; 12 = 'Conflicto de recursos'
+    14 = 'Necesita reiniciar el equipo'; 18 = 'Hay que reinstalar el driver'; 19 = 'Configuracion danada en el registro'
+    21 = 'Se esta quitando'; 22 = 'Deshabilitado a mano'; 24 = 'No presente o mal instalado'; 28 = 'SIN DRIVER'
+    29 = 'Desactivado en la BIOS'; 31 = 'El driver no carga'; 32 = 'El servicio del driver esta deshabilitado'
+    37 = 'El driver fallo al iniciar'; 39 = 'Driver danado o faltante'; 43 = 'Windows lo detuvo porque informo fallas'
+    48 = 'Bloqueado por incompatible'; 52 = 'Driver sin firma digital'
+}
+
+function Get-ProblemDevices {
+    foreach ($d in @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue)) {
+        $c = [int]$d.ConfigManagerErrorCode
+        if ($c -eq 0 -or $c -eq 45) { continue }
+        $name = [string]$d.Name; if (-not $name) { $name = 'Dispositivo desconocido' }
+        $id = ''
+        if ([string]$d.PNPDeviceID -match '(VEN_[0-9A-Fa-f]{4}&DEV_[0-9A-Fa-f]{4}|VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}|ACPI\\[A-Z0-9]+)') { $id = $matches[1] }
+        $txt = 'Codigo ' + $c; if ($global:PnpCodes.ContainsKey($c)) { $txt = $global:PnpCodes[$c] + ' (codigo ' + $c + ')' }
+        New-Object PSObject -Property @{ Nombre = $name; Codigo = $c; Problema = $txt; Id = $id }
+    }
+}
+
+function T-Devices {
+    Write-Section 'Dispositivos con problemas'
+    $list = @(Get-ProblemDevices)
+    if ($list.Count -eq 0) { Write-Host '  Todos los dispositivos funcionan correctamente.' -ForegroundColor Green; Write-Log 'Dispositivos: sin problemas'; return }
+    foreach ($d in $list) {
+        $col = 'Red'; if ($d.Codigo -eq 22) { $col = 'DarkGray' }
+        Write-Host ('  ' + $d.Nombre) -ForegroundColor $col
+        $extra = ''; if ($d.Id) { $extra = '   ID: ' + $d.Id }
+        Write-Host ('      ' + $d.Problema + $extra)
+        Write-Log ('Dispositivo con problema: ' + $d.Nombre + ' | ' + $d.Problema + ' | ' + $d.Id)
+    }
+    Write-Host ''
+    if (@($list | Where-Object { $_.Codigo -eq 28 }).Count -gt 0) {
+        Write-Host '  Para los que no tienen driver: prueba la opcion 1, o busca el "ID" en Google o en la web del fabricante del equipo.' -ForegroundColor DarkGray
+    }
+    if (@($list | Where-Object { $_.Codigo -eq 14 }).Count -gt 0) { Write-Host '  Algunos se arreglan solo con reiniciar el equipo.' -ForegroundColor DarkGray }
+    Write-Host '   1. Buscar drivers en Windows Update'
+    Write-Host '   2. Abrir el Administrador de dispositivos'
+    Write-Host '   3. Volver a detectar el hardware'
+    Write-Host '   0. Volver'
+    switch ((Read-Host '  Opcion').Trim()) {
+        '1' { T-DriverUpdates }
+        '2' { Start-Process devmgmt.msc }
+        '3' {
+            if ($global:WinBuild -ge 19041) { Step 'Volver a detectar el hardware' { pnputil /scan-devices } }
+            else { Write-Host '  En esta version: Administrador de dispositivos > menu Accion > "Buscar cambios de hardware".' -ForegroundColor Yellow; Start-Process devmgmt.msc }
+        }
+    }
+}
+
+# ---------- 57: que ocupa el disco ----------
+function Get-DirSize([string]$path) {
+    $total = [int64]0
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($path)
+    while ($stack.Count -gt 0) {
+        $di = New-Object IO.DirectoryInfo([string]$stack.Pop())
+        try { foreach ($f in $di.GetFiles()) { $total += $f.Length } } catch {}
+        try { foreach ($s in $di.GetDirectories()) { if (-not ($s.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($s.FullName) } } } catch {}
+    }
+    return $total
+}
+
+function T-DiskUsage {
+    Write-Section 'Que ocupa el disco'
+    Write-Host ('   1. Todo el disco ' + $env:SystemDrive + '  (puede tardar unos minutos)')
+    Write-Host ('   2. Carpetas de los usuarios (' + $env:SystemDrive + '\Users)')
+    Write-Host '   O escribe la ruta de una carpeta o disco (ejemplo: D:\)'
+    $s = (Read-Host '  Opcion').Trim().Trim('"')
+    if (-not $s -or $s -eq '0') { return }
+    $path = $s
+    if ($s -eq '1') { $path = $env:SystemDrive + '\' } elseif ($s -eq '2') { $path = $env:SystemDrive + '\Users' }
+    $hints = @{ 'pagefile.sys' = '(memoria virtual de Windows)'; 'hiberfil.sys' = '(hibernacion: se reduce con la opcion 7)'; 'swapfile.sys' = '(memoria de apps)'; 'Windows.old' = '(Windows anterior: se borra con la opcion 4)'; '$Recycle.Bin' = '(papelera: opcion 6)'; 'WinSxS' = '(componentes de Windows: no borrar a mano)' }
+    while ($path) {
+        if (-not (Test-Path -LiteralPath $path -PathType Container)) { Write-Host '  No existe esa carpeta.' -ForegroundColor Red; return }
+        $di = New-Object IO.DirectoryInfo($path)
+        Write-Host ''
+        Write-Host ('  Midiendo ' + $di.FullName + ' ...') -ForegroundColor DarkGray
+        $items = @(); $loose = [int64]0
+        try {
+            foreach ($f in $di.GetFiles()) {
+                if ($f.Length -ge 500MB) { $items += (New-Object PSObject -Property @{ Nombre = $f.Name; Ruta = ''; Bytes = [int64]$f.Length }) }
+                else { $loose += $f.Length }
+            }
+        } catch {}
+        $subs = @()
+        try { $subs = @($di.GetDirectories() | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }) } catch {}
+        $i = 0
+        foreach ($d in $subs) {
+            $i++
+            Write-Host (("`r  " + $i + ' de ' + $subs.Count + ': ' + $d.Name).PadRight(78).Substring(0, 78)) -NoNewline -ForegroundColor DarkGray
+            $items += (New-Object PSObject -Property @{ Nombre = $d.Name + '\'; Ruta = $d.FullName; Bytes = (Get-DirSize $d.FullName) })
+        }
+        Write-Host ("`r" + ''.PadRight(78) + "`r") -NoNewline
+        if ($loose -gt 0) { $items += (New-Object PSObject -Property @{ Nombre = '(archivos sueltos)'; Ruta = ''; Bytes = $loose }) }
+        $total = [int64](($items | Measure-Object -Property Bytes -Sum).Sum)
+        $items = @($items | Sort-Object Bytes -Descending | Select-Object -First 20)
+        $max = 1; if ($items.Count -gt 0 -and $items[0].Bytes -gt 0) { $max = $items[0].Bytes }
+        Write-Host ('  ' + $di.FullName + '   total: ' + (Format-Size $total)) -ForegroundColor Cyan
+        for ($k = 0; $k -lt $items.Count; $k++) {
+            $it = $items[$k]
+            $bar = ''.PadRight([int][math]::Ceiling(20 * $it.Bytes / $max), '#')
+            $h = ''; $key = $it.Nombre.TrimEnd('\'); if ($hints.ContainsKey($key)) { $h = '  ' + $hints[$key] }
+            Write-Host ('  ' + ([string]($k + 1)).PadLeft(3) + '  ' + (Format-Size $it.Bytes).PadLeft(10) + '  ') -NoNewline
+            Write-Host ($bar.PadRight(21)) -NoNewline -ForegroundColor Yellow
+            Write-Host ($it.Nombre + $h)
+        }
+        Write-Log ('Uso de disco: ' + $di.FullName + ' = ' + (Format-Size $total))
+        Write-Host ''
+        Write-Host '  Numero = entrar en esa carpeta  |  A y numero (ej: A 3) = abrirla en el Explorador  |  ENTER = salir' -ForegroundColor DarkGray
+        $r = (Read-Host '  Opcion').Trim()
+        $n = 0; $path = $null
+        if ($r -match '^[aA]\s*(\d+)$') {
+            $n = [int]$matches[1]
+            if ($n -ge 1 -and $n -le $items.Count -and $items[$n - 1].Ruta) { Start-Process explorer.exe ('"' + $items[$n - 1].Ruta + '"') }
+            $path = $di.FullName
+        } elseif ([int]::TryParse($r, [ref]$n) -and $n -ge 1 -and $n -le $items.Count) {
+            if ($items[$n - 1].Ruta) { $path = $items[$n - 1].Ruta } else { $path = $di.FullName }
+        }
+    }
+}
+
+# ---------- 58: archivos duplicados ----------
+function Get-FileHashSafe([string]$path) {
+    $fs = $null
+    try {
+        $fs = [IO.File]::OpenRead($path)
+        $sha = [Security.Cryptography.SHA1]::Create()
+        return [BitConverter]::ToString($sha.ComputeHash($fs))
+    } catch { return $null }
+    finally { if ($fs) { $fs.Close() } }
+}
+
+function T-Duplicates {
+    Write-Section 'Buscar archivos duplicados'
+    Write-Host '  Solo busca y muestra la lista: NO borra nada.' -ForegroundColor DarkGray
+    Write-Host '   1. Mis carpetas (Escritorio, Documentos, Descargas, Imagenes, Videos, Musica)'
+    Write-Host '   O escribe la ruta de una carpeta o disco (ejemplo: D:\)'
+    $s = (Read-Host '  Opcion').Trim().Trim('"')
+    if (-not $s -or $s -eq '0') { return }
+    $roots = @()
+    if ($s -eq '1') {
+        $cands = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Personal'), [Environment]::GetFolderPath('MyPictures'), [Environment]::GetFolderPath('MyMusic'),
+                   (Join-Path $env:USERPROFILE 'Downloads'), (Join-Path $env:USERPROFILE 'Videos'))
+        foreach ($c in $cands) { if ($c -and (Test-Path -LiteralPath $c)) { $roots += $c } }
+        $roots = @($roots | Select-Object -Unique)
+    } elseif (Test-Path -LiteralPath $s -PathType Container) { $roots = @($s) }
+    else { Write-Host '  No existe esa carpeta.' -ForegroundColor Red; return }
+
+    Write-Host '  Buscando archivos de 1 MB o mas...' -ForegroundColor DarkGray
+    $seen = @{}; $files = @()
+    foreach ($r in $roots) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $r -Recurse -File -ErrorAction SilentlyContinue)) {
+            if ($f.Length -ge 1MB -and -not $seen.ContainsKey($f.FullName)) { $seen[$f.FullName] = $true; $files += $f }
+        }
+    }
+    $cand = @($files | Group-Object Length | Where-Object { $_.Count -gt 1 })
+    $nCand = 0; foreach ($g in $cand) { $nCand += $g.Count }
+    Write-Host ('  ' + $files.Count + ' archivos revisados; ' + $nCand + ' tienen el mismo tamano que otro. Comparando contenido...') -ForegroundColor DarkGray
+    $sets = @(); $done = 0
+    foreach ($g in $cand) {
+        $byHash = @{}
+        foreach ($f in $g.Group) {
+            $done++
+            if ($done % 20 -eq 0) { Write-Host ("`r  " + $done + ' de ' + $nCand) -NoNewline -ForegroundColor DarkGray }
+            $h = Get-FileHashSafe $f.FullName
+            if (-not $h) { continue }
+            if (-not $byHash.ContainsKey($h)) { $byHash[$h] = @() }
+            $byHash[$h] += $f.FullName
+        }
+        foreach ($k in $byHash.Keys) {
+            $paths = @($byHash[$k])
+            if ($paths.Count -gt 1) { $sets += (New-Object PSObject -Property @{ Bytes = [int64]$g.Name; Copias = $paths.Count; Sobra = [int64]$g.Name * ($paths.Count - 1); Rutas = $paths }) }
+        }
+    }
+    Write-Host ("`r" + ''.PadRight(40) + "`r") -NoNewline
+    if ($sets.Count -eq 0) { Write-Host '  No hay archivos duplicados.' -ForegroundColor Green; Write-Log 'Duplicados: ninguno'; return }
+    $sets = @($sets | Sort-Object Sobra -Descending)
+    $waste = [int64](($sets | Measure-Object -Property Sobra -Sum).Sum)
+    Write-Host ('  ' + $sets.Count + ' grupos de archivos repetidos. Espacio que ocupan las copias: ' + (Format-Size $waste)) -ForegroundColor Yellow
+    Write-Host ''
+    foreach ($st in ($sets | Select-Object -First 10)) {
+        Write-Host ('  ' + $st.Copias + ' copias de ' + (Format-Size $st.Bytes) + ':') -ForegroundColor Cyan
+        foreach ($p in $st.Rutas) { Write-Host ('     ' + $p) }
+    }
+    $file = Join-Path $global:LogDir ('Duplicados_' + (Get-Date -Format 'yyyy-MM-dd_HH-mm') + '.txt')
+    $out = @('ARCHIVOS DUPLICADOS - ' + $env:COMPUTERNAME + ' - ' + (Get-Date -Format 'dd/MM/yyyy HH:mm') + ' - MG Toolkit',
+             ('Grupos: ' + $sets.Count + '   Espacio de las copias: ' + (Format-Size $waste)), '')
+    foreach ($st in $sets) { $out += ($st.Copias.ToString() + ' copias de ' + (Format-Size $st.Bytes) + ':'); foreach ($p in $st.Rutas) { $out += ('    ' + $p) }; $out += '' }
+    $out | Out-File -FilePath $file -Encoding UTF8 -Width 400
+    Write-Host ''
+    Write-Host ('  Lista completa guardada en: ' + $file)
+    Write-Host '  Revisa cada grupo y borra a mano las copias que no necesites (deja siempre una).' -ForegroundColor DarkGray
+    Write-Log ('Duplicados: ' + $sets.Count + ' grupos, ' + (Format-Size $waste) + ' en copias. Lista: ' + $file)
+    if (Confirm-Action 'Abrir la lista completa?') { Start-Process notepad.exe -ArgumentList ('"' + $file + '"') }
+}
+
+# ---------- 59: reparar la busqueda de Windows ----------
+function T-SearchRepair {
+    Write-Section 'Reparar la busqueda de Windows'
+    if (-not (Get-Service -Name WSearch -ErrorAction SilentlyContinue)) { Show-NotSupported 'El servicio de busqueda (Windows Search)'; return }
+    if ((Get-SvcStartMode 'WSearch') -eq 'Disabled') {
+        Write-Host '  El servicio de busqueda esta DESHABILITADO (quizas con la opcion 14). Sin el, buscar archivos es muy lento.' -ForegroundColor Yellow
+        if (-not (Confirm-Action 'Volver a habilitarlo?' $true)) { return }
+        Step 'Habilitar el servicio de busqueda' { Set-Service -Name WSearch -StartupType Automatic -ErrorAction Stop }
+    }
+    Write-Host '  Se borra el indice de busqueda y Windows lo vuelve a crear solo.' -ForegroundColor DarkGray
+    Write-Host '  Mientras se reconstruye (unas horas, en segundo plano) la busqueda puede salir incompleta.' -ForegroundColor DarkGray
+    if (-not (Confirm-Action 'Reconstruir el indice de busqueda?' $true)) { return }
+    Step 'Detener el servicio de busqueda' { Stop-Service -Name WSearch -Force -ErrorAction Stop }
+    Step 'Marcar el indice para crearlo de nuevo' { Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows Search' 'SetupCompletedSuccessfully' 0 }
+    Step 'Iniciar el servicio de busqueda' { Start-Service -Name WSearch -ErrorAction Stop }
+    if ($global:IsWin10) { Step 'Reiniciar la busqueda del menu Inicio' { Get-Process -Name SearchUI, SearchApp, SearchHost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } }
+    if (-not $global:DryRun) { Write-Host '  Si la busqueda del menu Inicio sigue sin responder, reinicia el equipo.' -ForegroundColor Green }
+}
+
+# ---------- 60: reparar iconos y miniaturas ----------
+function T-IconRepair {
+    Write-Section 'Reparar iconos en blanco o equivocados'
+    Write-Host '  La barra de tareas y el escritorio desaparecen unos segundos. Las ventanas abiertas no se cierran.' -ForegroundColor DarkGray
+    if (-not (Confirm-Action 'Reparar los iconos ahora?' $true)) { return }
+    if ($global:IsWin10) { Step 'Refrescar los iconos' { ie4uinit.exe -show } }
+    else { Step 'Refrescar los iconos' { ie4uinit.exe -ClearIconCache } }
+    if (-not $global:DryRun) { Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }
+    Clear-Folder 'Cache de iconos (Windows 7 / 8)' @("$env:SystemDrive\Users\*\AppData\Local") 'IconCache.db' 0 -NoRecurse
+    Clear-Folder 'Cache de iconos'     @("$env:SystemDrive\Users\*\AppData\Local\Microsoft\Windows\Explorer") 'iconcache_*.db'
+    Clear-Folder 'Cache de miniaturas' @("$env:SystemDrive\Users\*\AppData\Local\Microsoft\Windows\Explorer") 'thumbcache_*.db'
+    if (-not $global:DryRun) { Start-ExplorerIfNeeded; Write-Host '  Si algun icono sigue mal, reinicia el equipo.' -ForegroundColor Green }
+}
+
+# ---------- 61: suspension y energia ----------
+function Write-CmdOutput($lines) {
+    $any = $false
+    foreach ($l in @($lines)) { $t = ([string]$l).TrimEnd(); if ($t) { Write-Host ('    ' + $t); $any = $true } }
+    if (-not $any) { Write-Host '    (sin datos)' -ForegroundColor DarkGray }
+}
+
+function T-PowerIssues {
+    Write-Section 'Problemas de suspension y energia'
+    Write-Host '  Programas o dispositivos que impiden que el equipo se suspenda o apague la pantalla:' -ForegroundColor Cyan
+    Write-CmdOutput (powercfg /requests 2>&1)
+    Write-Host '  Que desperto al equipo la ultima vez:' -ForegroundColor Cyan
+    Write-CmdOutput (powercfg /lastwake 2>&1)
+    Write-Host '  Tareas programadas para despertar el equipo:' -ForegroundColor Cyan
+    Write-CmdOutput (powercfg /waketimers 2>&1)
+    Write-Host ''
+    Write-Host '   1. Elegir que dispositivos NO pueden despertar el equipo (ej: el mouse)'
+    Write-Host '   2. Crear informe completo de energia (tarda 60 segundos)'
+    Write-Host '   0. Volver'
+    switch ((Read-Host '  Opcion').Trim()) {
+        '1' {
+            $devs = @(powercfg /devicequery wake_armed 2>$null | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -and $_ -notmatch '^(NONE|NINGUNO|NINGUNA)$' })
+            if ($devs.Count -eq 0) { Write-Host '  Ningun dispositivo puede despertar el equipo.' -ForegroundColor Green; return }
+            for ($i = 0; $i -lt $devs.Count; $i++) { Write-Host ('   ' + ($i + 1) + '. ' + $devs[$i]) }
+            $sel = Read-Host '  Numeros de los que NO deben despertarlo (ej: 1,3; ENTER = ninguno)'
+            foreach ($k in (Get-Selection $sel $devs.Count)) {
+                $dn = $devs[$k]
+                Step ('No despertar con: ' + $dn) { powercfg /devicedisablewake $dn }
+            }
+            Write-Host '  Para deshacerlo: Administrador de dispositivos > el dispositivo > Administracion de energia.' -ForegroundColor DarkGray
+        }
+        '2' {
+            $file = Join-Path $global:LogDir ('Energia_' + (Get-Date -Format 'yyyy-MM-dd_HH-mm') + '.html')
+            Write-Host '  No uses el equipo durante el analisis.' -ForegroundColor Yellow
+            Invoke-Live 'Analizar el consumo de energia (60 segundos)' 'powercfg.exe' ('/energy /output "' + $file + '" /duration 60')
+            if (Test-Path -LiteralPath $file) { Write-Host ('  Informe guardado en: ' + $file); Start-Process $file }
+        }
+    }
+}
+
+# ---------- 62: inicio rapido ----------
+function T-FastStartup {
+    Write-Section 'Inicio rapido de Windows'
+    if (-not $global:IsWin8) { Show-NotSupported 'El inicio rapido'; return }
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power'
+    $hb  = (Get-ItemProperty $key -ErrorAction SilentlyContinue).HiberbootEnabled
+    $hib = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -ErrorAction SilentlyContinue).HibernateEnabled
+    $os = Get-CimInstance Win32_OperatingSystem
+    $up = (Get-Date) - $os.LastBootUpTime
+    Write-Host '  Con el inicio rapido, "Apagar" no apaga del todo: Windows guarda el sistema en el disco para arrancar'
+    Write-Host '  unos segundos antes. A cambio, los fallos no se limpian al apagar, algunas actualizaciones y drivers no'
+    Write-Host '  terminan de aplicarse y el equipo puede llevar dias sin reiniciarse de verdad.'
+    Write-Host '  Recomendado DESACTIVARLO si el equipo tiene SSD o si tiene fallos raros. "Reiniciar" siempre limpia todo.' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host ('  Sin reiniciar de verdad desde hace: ' + $up.Days + ' dias y ' + $up.Hours + ' horas')
+    if ($hib -eq 0) { Write-Host '  Estado: DESACTIVADO (la hibernacion esta apagada, por ejemplo con la opcion 7).' -ForegroundColor Green; return }
+    if ($hb -ne 0) {
+        Write-Host '  Estado: ACTIVADO' -ForegroundColor Yellow
+        if (Confirm-Action 'Desactivar el inicio rapido?' $true) { Step 'Desactivar el inicio rapido' { Set-Reg $key 'HiberbootEnabled' 0 } }
+    } else {
+        Write-Host '  Estado: DESACTIVADO' -ForegroundColor Green
+        if (Confirm-Action 'Volver a activarlo?' $false) { Step 'Activar el inicio rapido' { Set-Reg $key 'HiberbootEnabled' 1 } }
+    }
+}
+
+# ---------- 63: activacion de Office ----------
+function T-OfficeStatus {
+    Write-Section 'Activacion de Microsoft Office'
+    $skip = 'MUI|Proof|Language|Idioma|Correcci|Shared|Compartid|Runtime|Click-to-Run|Extensib|Viewer|Licens|Access database|Primary Interop'
+    $progs = @(Get-InstalledPrograms | Where-Object { $_.Programa -match '^Microsoft (Office|365)|^Microsoft (Word|Excel|PowerPoint|Outlook|Visio|Project) ' -and $_.Programa -notmatch $skip })
+    if ($progs.Count -eq 0) { Write-Host '  No se encontro Microsoft Office instalado.' -ForegroundColor Yellow }
+    else { foreach ($p in $progs) { Write-Host ('  Instalado: ' + $p.Programa + '  ' + $p.Version) } }
+
+    $lic = @(Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='0ff1ce15-a989-479d-af46-f275c6370663' AND PartialProductKey IS NOT NULL" -ErrorAction SilentlyContinue)
+    try { $lic += @(Get-CimInstance OfficeSoftwareProtectionProduct -Filter 'PartialProductKey IS NOT NULL' -ErrorAction Stop) } catch {}
+    $map = @{ 0 = 'SIN LICENCIA'; 1 = 'ACTIVADO'; 2 = 'Periodo de prueba'; 3 = 'Prueba adicional'; 4 = 'NO ORIGINAL'; 5 = 'NO ACTIVADO'; 6 = 'Prueba extendida' }
+    Write-Host ''
+    if ($lic.Count -eq 0) {
+        if ($progs.Count -gt 0) {
+            Write-Host '  No hay ninguna clave de Office instalada en el equipo.' -ForegroundColor Yellow
+            Write-Host '  Si es Microsoft 365 u Office 2021/2024 con cuenta Microsoft, la licencia esta en la cuenta:'
+            Write-Host '  abre Word > Archivo > Cuenta para ver si esta activado.'
+        }
+        Write-Log ('Office: ' + $progs.Count + ' instalado(s), sin claves')
+        return
+    }
+    $kms = $false
+    foreach ($l in $lic) {
+        $st = [int]$l.LicenseStatus
+        $col = 'Green'; if ($st -ne 1) { $col = 'Red' }
+        Write-Host ('  ' + $l.Name)
+        Write-Host ('    Estado: ') -NoNewline
+        Write-Host $map[$st] -NoNewline -ForegroundColor $col
+        Write-Host ('   |   Clave que termina en: ' + $l.PartialProductKey)
+        if ($st -ne 1 -and [int]$l.GracePeriodRemaining -gt 0) { Write-Host ('    Le quedan ' + [math]::Floor([int]$l.GracePeriodRemaining / 1440) + ' dias para activarlo.') -ForegroundColor Yellow }
+        Write-Host ('    Tipo: ' + $l.Description) -ForegroundColor DarkGray
+        if ([string]$l.Description -match 'KMS') { $kms = $true }
+        Write-Log ('Office: ' + $l.Name + ' -> ' + $map[$st])
+    }
+    if ($kms) {
+        $dom = [bool](Get-CimInstance Win32_ComputerSystem).PartOfDomain
+        if (-not $dom) {
+            Write-Host ''
+            Write-Host '  ATENCION: Office esta activado por "KMS" y el equipo no es de una empresa.' -ForegroundColor Yellow
+            Write-Host '  Suele ser una activacion no original (KMSpico, KMSAuto), que a menudo trae virus. Conviene usar una licencia original.' -ForegroundColor Yellow
+        }
+    }
+}
+
+# ---------- 64: cuentas de usuario ----------
+function Get-LocalAdmins {
+    $list = @()
+    try {
+        $g = @(Get-WmiObject Win32_Group -Filter "LocalAccount=True AND SID='S-1-5-32-544'" -ErrorAction Stop)[0]
+        $grp = [ADSI]('WinNT://' + $env:COMPUTERNAME + '/' + $g.Name + ',group')
+        foreach ($m in @($grp.psbase.Invoke('Members'))) {
+            $list += [string]$m.GetType().InvokeMember('Name', 'GetProperty', $null, $m, $null)
+        }
+    } catch {}
+    return $list
+}
+
+function T-Users {
+    Write-Section 'Cuentas de usuario del equipo'
+    $accs = @(Get-WmiObject Win32_UserAccount -Filter 'LocalAccount=True' -ErrorAction SilentlyContinue)
+    $admins = @(Get-LocalAdmins)
+    $rows = @(); $guest = $null; $builtin = $null
+    foreach ($a in $accs) {
+        $rid = ([string]$a.SID).Split('-')[-1]
+        if (@('503', '504') -contains $rid -and $a.Disabled) { continue }     # cuentas internas de Windows
+        if ($rid -eq '501') { $guest = $a }
+        if ($rid -eq '500') { $builtin = $a }
+        $last = 'Nunca'
+        try {
+            $v = ([ADSI]('WinNT://' + $env:COMPUTERNAME + '/' + $a.Name + ',user')).LastLogin.Value
+            if ($v) { $last = ([datetime]$v).ToString('dd/MM/yyyy HH:mm') }
+        } catch {}
+        $tipo = 'Estandar'; if ($admins -contains $a.Name) { $tipo = 'ADMINISTRADOR' }
+        $est = 'Activa'; if ($a.Disabled) { $est = 'Desactivada' }
+        $rows += (New-Object PSObject -Property @{ Usuario = $a.Name; Tipo = $tipo; Estado = $est; 'Ultimo inicio' = $last; 'Nombre completo' = $a.FullName })
+    }
+    $rows | Select-Object Usuario, 'Nombre completo', Tipo, Estado, 'Ultimo inicio' | Show-Table
+    $others = @($admins | Where-Object { $n = $_; -not ($accs | Where-Object { $_.Name -eq $n }) })
+    if ($others.Count -gt 0) { Write-Host ('  Otros administradores (de dominio o grupos): ' + ($others -join ', ')) -ForegroundColor DarkGray }
+    $activeAdm = @($rows | Where-Object { $_.Tipo -eq 'ADMINISTRADOR' -and $_.Estado -eq 'Activa' })
+    Write-Log ('Cuentas: ' + $rows.Count + ' (' + $activeAdm.Count + ' administradoras activas)')
+    if ($activeAdm.Count -gt 2) { Write-Host ('  Hay ' + $activeAdm.Count + ' cuentas administradoras activas: revisa que conozcas todas. Un intruso o un virus puede crear una.') -ForegroundColor Yellow }
+    if ($builtin -and -not $builtin.Disabled) { Write-Host '  La cuenta "Administrador" interna esta activa. Si nadie la usa, conviene desactivarla o ponerle contrasena.' -ForegroundColor Yellow }
+    if ($guest -and -not $guest.Disabled) {
+        Write-Host '  La cuenta de INVITADO esta activa: cualquiera puede entrar al equipo sin contrasena.' -ForegroundColor Yellow
+        if (Confirm-Action 'Desactivar la cuenta de invitado?' $true) {
+            $gsid = [string]$guest.SID
+            Step 'Desactivar la cuenta de invitado' { $w = Get-WmiObject Win32_UserAccount -Filter ("SID='" + $gsid + "'"); $w.Disabled = $true; [void]$w.Put() }
+        }
+    }
+    Write-Host ''
+    if (Confirm-Action 'Abrir la ventana de cuentas de usuario (contrasenas, tipo de cuenta)?') { Start-Process control.exe -ArgumentList 'userpasswords2' }
+}
+
 function Invoke-Task([string]$name, [scriptblock]$body, [switch]$Simple) {
     $global:Freed = [int64]0; $global:Errors = 0; $global:Warnings = 0; $global:YesAll = $false
     Clear-Host
@@ -3206,7 +3799,7 @@ try {
     $raw.BufferSize = $buf
     $win = $raw.WindowSize
     $win.Width  = [math]::Min(100, $max.Width)
-    $win.Height = [math]::Min(54, $max.Height)
+    $win.Height = [math]::Min(58, $max.Height)
     $raw.WindowSize = $win
 } catch {}
 
@@ -3257,6 +3850,8 @@ while ($true) {
         (New-MI '7' 'Liberar espacio (hibernacion)'),
         (New-MI '8' 'Buscar archivos grandes'),
         (New-MI '9' 'Quitar apps basura de fabrica'),
+        (New-MI '57' 'Ver que ocupa el disco (carpetas)'),
+        (New-MI '58' 'Buscar archivos duplicados'),
         $null,
         (New-MH 'VELOCIDAD'),
         (New-MI '10' 'Poner en maximo rendimiento'),
@@ -3267,12 +3862,14 @@ while ($true) {
         (New-MI '15' 'Desactivar telemetria y anuncios'),
         (New-MI '16' 'Medir velocidad del disco'),
         (New-MI '17' 'Deshacer cambios de velocidad'),
+        (New-MI '62' 'Inicio rapido de Windows (on / off)'),
         $null,
         (New-MH 'ACTUALIZAR E INSTALAR'),
         (New-MI '18' 'Instalar actualizaciones de Windows'),
         (New-MI '19' 'Actualizar todos los programas'),
         (New-MI '20' 'Instalar programas basicos'),
         (New-MI '49' 'Actualizar drivers (Windows Update)'),
+        (New-MI '54' 'Compatibilidad con Windows 11'),
         $null,
         (New-MH 'RED E INTERNET'),
         (New-MI '43' 'Probar internet (velocidad y fallas)'),
@@ -3288,6 +3885,7 @@ while ($true) {
         (New-MI '22' 'Crear punto de restauracion'),
         (New-MI '23' 'Respaldar archivos del usuario'),
         (New-MI '24' 'Respaldar / restaurar drivers'),
+        (New-MI '64' 'Cuentas de usuario del equipo'),
         $null,
         (New-MH 'REPARACION'),
         (New-MI '25' 'Reparar archivos de Windows'),
@@ -3299,6 +3897,10 @@ while ($true) {
         (New-MI '31' 'Reiniciar servicios trabados'),
         (New-MI '32' 'Restablecer el firewall'),
         (New-MI '33' 'Probar la memoria RAM'),
+        (New-MI '56' 'Dispositivos con problemas'),
+        (New-MI '59' 'Reparar la busqueda de Windows'),
+        (New-MI '60' 'Reparar iconos y miniaturas'),
+        (New-MI '61' 'Problemas de suspension y energia'),
         $null,
         (New-MH 'INFORMACION'),
         (New-MI '34' 'Informacion del equipo'),
@@ -3307,6 +3909,8 @@ while ($true) {
         (New-MI '37' 'Contrasenas y reporte de WiFi'),
         (New-MI '50' 'Clave de producto de Windows'),
         (New-MI '51' 'Lista de programas instalados'),
+        (New-MI '55' 'Historial de fallos y pantallas azules'),
+        (New-MI '63' 'Ver si Office esta activado'),
         $null,
         (New-MH 'OTROS'),
         (New-MI '38' 'Mantenimiento automatico semanal'),
@@ -3387,6 +3991,17 @@ while ($true) {
         '51' { Invoke-Task 'Programas instalados' { T-ProgramsList } -Simple }
         '52' { Invoke-Task 'Reiniciar en modo especial' { T-Reboot } -Simple }
         '53' { T-WinTools }
+        '54' { Invoke-Task 'Compatibilidad con Windows 11' { T-Win11Check } -Simple }
+        '55' { Invoke-Task 'Historial de fallos' { T-CrashHistory } -Simple }
+        '56' { Invoke-Task 'Dispositivos con problemas' { T-Devices } -Simple }
+        '57' { Invoke-Task 'Que ocupa el disco' { T-DiskUsage } -Simple }
+        '58' { Invoke-Task 'Buscar archivos duplicados' { T-Duplicates } -Simple }
+        '59' { Invoke-Task 'Reparar la busqueda de Windows' { T-SearchRepair } }
+        '60' { Invoke-Task 'Reparar iconos y miniaturas' { T-IconRepair } }
+        '61' { Invoke-Task 'Suspension y energia' { T-PowerIssues } -Simple }
+        '62' { Invoke-Task 'Inicio rapido de Windows' { T-FastStartup } }
+        '63' { Invoke-Task 'Activacion de Office' { T-OfficeStatus } -Simple }
+        '64' { Invoke-Task 'Cuentas de usuario' { T-Users } -Simple }
         '0'  { Write-Log 'Programa cerrado por el usuario'; exit 0 }
         default {
             if ($op) { Write-Host ('   "' + $op + '" no es una opcion valida. Escribe solo el numero, por ejemplo: 4') -ForegroundColor Red; Start-Sleep -Seconds 2 }

@@ -36,9 +36,16 @@ Cuando el programa pregunta, responde:
 | "Conexión no segura" en todas las páginas | **48** (hora incorrecta) |
 | Sin internet | **43** → **28** y reinicia |
 | Virus que no se deja borrar | **52** → modo seguro → **21** |
+| ¿Puede pasar a Windows 11? | **54** |
+| Se apaga solo o pantallas azules | **55** para ver la causa → **56** → **33** |
+| Algo no funciona (sonido, WiFi, USB) | **56** (dispositivos sin driver) |
+| No encuentra archivos o el menú Inicio no busca | **59** |
+| Iconos en blanco | **60** |
+| No se suspende o se enciende solo | **61** |
+| Fallos raros que no se van al apagar | **62** (desactivar inicio rápido) y reiniciar |
 | Impresora trabada | **30** |
 | Windows Update falla | **29** → reiniciar → **18** |
-| Disco lleno | **4** → **8** → **7** |
+| Disco lleno | **57** para ver qué ocupa → **4** → **58** → **7** |
 | Pantallas azules | **3** → **25** → **26** → **33** |
 
 ## 3. Las opciones
@@ -53,6 +60,8 @@ Cuando el programa pregunta, responde:
 - **7** Hibernación (libera varios GB)
 - **8** Buscar archivos grandes (solo muestra, no borra)
 - **9** Quitar apps basura de fábrica (se pueden reinstalar desde la Tienda)
+- **57** Ver qué ocupa el disco: carpetas ordenadas por tamaño. Escribe un número para entrar en una carpeta, o `A 3` para abrirla
+- **58** Buscar archivos duplicados (solo muestra la lista, no borra nada)
 
 **Velocidad**
 - **10** Máximo rendimiento
@@ -63,12 +72,14 @@ Cuando el programa pregunta, responde:
 - **15** Telemetría y anuncios
 - **16** Medir velocidad del disco (LENTO = disco mecánico)
 - **17** **Deshacer** los cambios de velocidad
+- **62** Inicio rápido de Windows: activarlo o desactivarlo (desactivado, "Apagar" apaga del todo)
 
 **Actualizar e instalar**
 - **18** Actualizaciones de Windows
 - **19** Actualizar programas
 - **20** Instalar programas básicos (Chrome, 7-Zip, VLC, AnyDesk…)
 - **49** Actualizar drivers desde Windows Update (eliges cuáles; crea un punto de restauración antes)
+- **54** Compatibilidad con Windows 11: revisa procesador, RAM, disco, UEFI, arranque seguro y TPM, y dice qué se puede arreglar en la BIOS
 
 **Red e internet**
 - **43** Probar internet: router, pérdida de paquetes, DNS y velocidad de descarga, con el diagnóstico
@@ -83,6 +94,7 @@ Cuando el programa pregunta, responde:
 - **22** Punto de restauración
 - **23** Respaldar archivos a una USB (solo copia, nunca borra)
 - **24** Respaldar o restaurar drivers
+- **64** Cuentas de usuario: quién es administrador, cuentas activas y último inicio. Ofrece desactivar la cuenta de invitado
 
 **Reparación**
 - **25** Reparar archivos de Windows (DISM + SFC)
@@ -94,8 +106,12 @@ Cuando el programa pregunta, responde:
 - **31** Reiniciar servicios trabados (audio, impresión, red)
 - **32** Restablecer el firewall (borra las reglas de los programas)
 - **33** Probar la memoria RAM (reinicia el equipo)
+- **56** Dispositivos con problemas: los que no tienen driver o fallan, con su ID para buscar el driver
+- **59** Reparar la búsqueda de Windows (reconstruye el índice; tarda unas horas en segundo plano)
+- **60** Reparar iconos en blanco o equivocados (el escritorio parpadea unos segundos)
+- **61** Problemas de suspensión: qué impide que se suspenda, qué lo despertó, y un informe de energía
 
-**Información:** **34** datos del equipo · **35** batería · **36** activación · **37** contraseñas WiFi · **50** clave de producto de Windows · **51** lista de programas instalados (se guarda en un archivo). Las claves y contraseñas solo se muestran en pantalla, nunca se guardan.
+**Información:** **34** datos del equipo · **35** batería · **36** activación · **37** contraseñas WiFi · **50** clave de producto de Windows · **51** lista de programas instalados (se guarda en un archivo) · **55** historial de fallos: pantallas azules con su causa probable, apagados inesperados, errores del disco y programas que se cierran solos · **63** activación de Office (avisa si es una activación no original). Las claves y contraseñas solo se muestran en pantalla, nunca se guardan.
 
 **Otros:** **38** mantenimiento semanal automático · **39** modo simulación · **40** carpeta de informes · **41** opciones avanzadas · **42** este manual · **52** reiniciar en modo seguro, BIOS u opciones avanzadas (y volver a normal) · **53** atajos a 22 herramientas de Windows (dispositivos, eventos, discos, servicios…)
 
@@ -126,6 +142,8 @@ Un disco mecánico (HDD), poca RAM o una batería gastada no se arreglan con nin
 | Velocidad, efectos visuales, telemetría | Opción **17** |
 | Un programa de inicio | Opción **12** → `A número` |
 | Un servicio | Opción **14** → `número A` |
+| Inicio rápido | Opción **62** otra vez |
+| Un dispositivo que ya no despierta el equipo | Administrador de dispositivos → el dispositivo → Administración de energía |
 | Cualquier otro cambio | `Win` + `R` → escribe `rstrui` → elige el punto **"MG Toolkit"** |
 
 ## 6. Windows 7 y 8
@@ -143,6 +161,7 @@ El programa detecta la versión de Windows y se adapta solo. En las versiones an
 | Reporte de batería y de WiFi | No | Sí |
 | Entrar a la BIOS / opciones avanzadas (52) | No: pulsa F2, Supr o F8 al encender | Sí |
 | Clave de producto en la BIOS (50) | No (se muestra la instalada) | Sí |
+| Inicio rápido (62) | No existe | Sí |
 
 > **Windows 7 y 8 ya no reciben parches de seguridad.** El informe lo marca como problema crítico y recomienda pasar a Windows 11 si el equipo es compatible.
 
